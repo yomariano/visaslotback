@@ -5303,3 +5303,14 @@
   "summary": "No changes detected. Both previous and current states indicate no available slots or locations.",
   "timestamp": "2025-04-30T09:38:48.973605"
 }
+2025-04-30 09:39:44.513 | INFO     | __main__:monitor_appointments:201 - Starting appointment monitoring cycle...
+2025-04-30 09:39:48.305 | INFO     | __main__:extract_appointment_data:81 - Successfully extracted data from https://schengenappointments.com/
+2025-04-30 09:39:49.218 | INFO     | __main__:monitor_appointments:212 - Change Analysis:
+{
+  "new_slots": [],
+  "removed_slots": [],
+  "location_changes": [],
+  "other_changes": [],
+  "summary": "No changes in available slots or locations.",
+  "timestamp": "2025-04-30T09:39:49.218719"
+}
