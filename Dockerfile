@@ -9,8 +9,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application files
 COPY . .
 
-# Create logs directory
-RUN mkdir -p logs
+# Create logs directory and set permissions
+RUN mkdir -p logs && \
+    chmod +x start.sh
 
-# Run the application
-CMD ["python", "appointment_monitor.py"] 
+# Run the application using the startup script
+CMD ["./start.sh"] 
