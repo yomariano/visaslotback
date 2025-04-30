@@ -28,13 +28,12 @@ class AppointmentMonitor:
     def __init__(self):
         self.base_url = "https://schengenappointments.com"
         self.cities_by_country = {
-            # "Canada": ["Edmonton", "Montreal", "Ottawa", "Toronto", "Vancouver"],
-            # "Ireland": ["Dublin"],
-            "United Arab Emirates": ["Dubai"],
-            # "United Arab Emirates": ["Abu Dhabi", "Dubai"],
-            # "United Kingdom": ["Birmingham", "Cardiff", "Edinburgh", "London", "Manchester"],
-            # "United States": ["Atlanta", "Boston", "Chicago", "Houston", "Los Angeles", 
-            # "Miami", "New York", "San Francisco", "Seattle", "Washington DC"]
+            "Canada": ["Edmonton", "Montreal", "Ottawa", "Toronto", "Vancouver"],
+            "Ireland": ["Dublin"],
+            "United Arab Emirates": ["Abu Dhabi", "Dubai"],
+            "United Kingdom": ["Birmingham", "Cardiff", "Edinburgh", "London", "Manchester"],
+            "United States": ["Atlanta", "Boston", "Chicago", "Houston", "Los Angeles", 
+            "Miami", "New York", "San Francisco", "Seattle", "Washington DC"]
         }
         
         # Initialize browser config
