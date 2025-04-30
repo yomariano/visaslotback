@@ -17,8 +17,8 @@ load_dotenv()
 
 # Configure logging
 logger.add(
-    "logs/appointment_monitor_{time}.log",
-    rotation="1 day",
+    "logs/appointment_monitor_{date}.log",
+    rotation="00:00",  # Rotate at midnight
     retention="7 days",
     level="INFO"
 )
