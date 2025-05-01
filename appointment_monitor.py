@@ -3,7 +3,6 @@ import time
 import asyncio
 import json
 import aiohttp
-import subprocess
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import re
@@ -67,52 +66,6 @@ class AppointmentMonitor:
         
         # Initialize crawler as None - will be set up when needed
         self.crawler = None
-        
-        # Ensure Playwright is installed
-        self._setup_playwright()
-
-    def _setup_playwright(self):
-        """Ensure Playwright and its browser dependencies are installed."""
-        try:
-            # Try to import playwright to check if it's installed
-            import playwright
-            
-            # Install browser if not already installed
-            logger.info("Installing Playwright browser dependencies...")
-            result = subprocess.run(
-                ["playwright", "install", "chromium"],
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode == 0:
-                logger.info("Playwright browser dependencies installed successfully")
-            else:
-                logger.error(f"Failed to install Playwright browser: {result.stderr}")
-                
-        except ImportError:
-            logger.error("Playwright not found. Installing playwright...")
-            try:
-                # Install playwright package
-                subprocess.run(
-                    ["pip", "install", "playwright"],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                
-                # Install browser
-                subprocess.run(
-                    ["playwright", "install", "chromium"],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                logger.info("Playwright and browser dependencies installed successfully")
-                
-            except subprocess.CalledProcessError as e:
-                logger.error(f"Failed to install Playwright: {e.stderr}")
-                raise
 
     async def setup_crawler(self):
         """Initialize the crawler if it hasn't been set up yet."""
