@@ -19,10 +19,10 @@ class NotificationData:
 class NotificationService:
     def __init__(self):
         # Email settings
-        self.smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
-        self.smtp_username = os.getenv("SMTP_USERNAME")
-        self.smtp_password = os.getenv("SMTP_PASSWORD")
+        self.smtp_server = os.getenv("SMTP_SERVER", "mail.privateemail.com")
+        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))  # Namecheap uses port 587 for TLS
+        self.smtp_username = os.getenv("SMTP_USERNAME")  # Your full email: notifications@visaslot.xyz
+        self.smtp_password = os.getenv("SMTP_PASSWORD")  # Your email account password
         
         # Twilio settings
         self.twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")

@@ -73,10 +73,6 @@ class AppointmentMonitor:
                 month = 12
             self.tracked_months.append(datetime.strptime(str(month), "%m").strftime("%b").upper())
         
-        # Initialize webhook settings
-        self.webhook_url = os.getenv("WEBHOOK_URL")
-        self.webhook_enabled = self.webhook_url is not None and len(self.webhook_url) > 0
-        
         # Initialize crawler as None - will be set up when needed
         self.crawler = None
         
@@ -92,9 +88,7 @@ class AppointmentMonitor:
         """
         try:
             if self.crawler is None:
-                logger.info("Initializing AsyncWebCrawler...")
                 self.crawler = await AsyncWebCrawler(config=self.browser_config).__aenter__()
-                logger.info("AsyncWebCrawler initialized successfully")
                 return True
             return True  # Already initialized
         except Exception as e:
@@ -106,9 +100,7 @@ class AppointmentMonitor:
         """Clean up the crawler instance."""
         if self.crawler is not None:
             try:
-                logger.info("Cleaning up AsyncWebCrawler...")
                 await self.crawler.__aexit__(None, None, None)
-                logger.info("AsyncWebCrawler cleaned up successfully")
             except Exception as e:
                 logger.error(f"Error cleaning up crawler: {e}")
             finally:
@@ -116,21 +108,18 @@ class AppointmentMonitor:
 
     async def cleanup(self):
         """Clean up all resources used by the monitor."""
-        logger.info("Cleaning up AppointmentMonitor resources...")
         
         # Close the crawler if it's open
-        logger.info("Closing AsyncWebCrawler...")
         await self.cleanup_crawler()
-        logger.info("AsyncWebCrawler closed successfully")
         
         # Close MongoDB connection
         await self.db.close()
-        logger.info("MongoDB connection closed")
 
     def get_city_url(self, city: str) -> str:
         """Generate the URL for a specific city's tourism appointments."""
         city_formatted = city.lower().replace(" ", "-")
-        return f"{self.base_url}/in/{city_formatted}/tourism"
+        url = f"{self.base_url}/in/{city_formatted}/tourism"
+        return url.replace("...", "")  # Remove any ellipsis that might have been added
     
     async def extract_appointment_data(self, city: str) -> Dict:
         """Extract appointment data from the website for a specific city using Crawl4AI."""
@@ -300,13 +289,10 @@ class AppointmentMonitor:
                             if not line:
                                 continue
                                 
-                            logger.debug(f"Processing line {i}: {line}")
-                            
                             # Detect table header line more specifically
                             # Only check if we haven't found the table yet
                             if not in_table_section and "DESTINATION" in line.upper() and "EARLIEST" in line.upper() and "|" in line:
                                 in_table_section = True
-                                logger.debug(f"Table header found at line {i}")
                                 continue # Skip processing the header line itself
 
                             # Skip lines before the table section or the separator line
@@ -329,6 +315,7 @@ class AppointmentMonitor:
                                         if country.lower() in country_col.lower() or flag in country_col:
                                             if country not in data["temporarily_unavailable"]:
                                                 data["temporarily_unavailable"].append(country)
+                                                logger.info(f"Added {country} to temporarily unavailable list for {city}")
                                             break
                                 continue
 
@@ -367,7 +354,6 @@ class AppointmentMonitor:
                                             for idx, month in enumerate(self.tracked_months, 2):
                                                 if idx < len(columns):
                                                     slot_text = columns[idx].strip()
-                                                    logger.debug(f"Processing slot text for {month}: '{slot_text}'")
                                                     
                                                     # Check for slots pattern with more variations
                                                     slots_match = re.search(r'(\d+)\s*[\+]?\s*slots?|(\d+)\s*\+', slot_text, re.IGNORECASE)
@@ -375,28 +361,22 @@ class AppointmentMonitor:
                                                         matched_group = slots_match.group(1) or slots_match.group(2)
                                                         slot_value = f"{matched_group}+"
                                                         current_country_data["slots"][month] = slot_value
-                                                        logger.debug(f"Found slots for {month}: {slot_value}")
                                                     # Check for notify pattern
                                                     elif any(word in slot_text.lower() for word in ["notify", "notification", "alert"]):
                                                         current_country_data["slots"][month] = "0"
-                                                        logger.debug(f"Found notify for {month}, setting to 0")
-                                                    else:
-                                                        logger.debug(f"No match found for {month} in text: '{slot_text}'")
-                                            
+                                                    
                                             # Add to countries list if we have either date or slots
                                             if (current_country_data["earliest_available"] is not None or 
                                                 any(slots for slots in current_country_data["slots"].values() if slots is not None)):
                                                 data["countries"].append(current_country_data)
-                                                logger.debug(f"Added country data: {current_country_data}")
+                                                logger.info(f"Found available slots for {country} in {city}")
                                             break
                 
                         logger.info(f"Successfully extracted data from {city_url}")
-                        logger.debug(f"Final parsed data: {json.dumps(data, indent=2)}")
                         return data
                     
                     except Exception as parse_error:
                         logger.error(f"Error parsing content for {city} at line {i if 'i' in locals() else 'unknown'}: {parse_error}")
-                        logger.debug(f"Content causing error: {content[:500]}...")  # Show first 500 chars of content
                         data["error"] = f"Parse error: {str(parse_error)}"
                         # Don't retry parsing errors - they're not related to crawler issues
                         return data
@@ -415,7 +395,6 @@ class AppointmentMonitor:
                     
                     # Log the full result object structure for debugging
                     logger.error(f"Failed to extract data for {city}: {error_msg}")
-                    logger.debug(f"Full result object structure: {dir(result)}")
                     
                     data["error"] = error_msg
                     return data
@@ -450,92 +429,6 @@ class AppointmentMonitor:
         # If we get here with no data populated, ensure we return the base data
         return data
 
-    async def send_webhook(self, data: Dict[str, Any]) -> bool:
-        """Send the data to the configured webhook endpoint.
-        
-        Args:
-            data: The data to send to the webhook
-            
-        Returns:
-            bool: True if webhook was successfully sent, False otherwise
-        """
-        if not self.webhook_enabled:
-            logger.warning("Webhook not configured. Set WEBHOOK_URL environment variable to enable.")
-            return False
-
-        try:
-            # First validate that data can be serialized with our custom encoder
-            try:
-                json_data = json.dumps(data, cls=MongoJSONEncoder)
-            except TypeError as json_error:
-                logger.error(f"Data serialization error: {json_error}")
-                logger.error(f"Problematic data type detected, attempting to fix")
-                
-                # Attempt to convert any problematic MongoDB ObjectId objects
-                json_data = self._sanitize_for_json(data)
-            
-            # Send the webhook with the serialized data
-            try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        self.webhook_url,
-                        data=json_data,
-                        headers={"Content-Type": "application/json"}
-                    ) as response:
-                        if response.status >= 200 and response.status < 300:
-                            logger.info(f"Webhook sent successfully: {response.status}")
-                            return True
-                        else:
-                            logger.error(f"Failed to send webhook: {response.status}")
-                            response_text = await response.text()
-                            logger.error(f"Response: {response_text}")
-                            return False
-            except aiohttp.ClientError as client_error:
-                logger.error(f"HTTP client error when sending webhook: {client_error}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error sending webhook: {e}")
-            return False
-            
-    def _sanitize_for_json(self, data: Any) -> str:
-        """Recursively convert data to JSON-serializable format.
-        
-        This is a fallback for the MongoJSONEncoder to handle complex nested structures.
-        
-        Args:
-            data: Any Python object to be serialized
-            
-        Returns:
-            str: JSON string representation of the data
-        """
-        if isinstance(data, dict):
-            return json.dumps({k: self._sanitize_value(v) for k, v in data.items()})
-        elif isinstance(data, list):
-            return json.dumps([self._sanitize_value(item) for item in data])
-        else:
-            return json.dumps(self._sanitize_value(data))
-            
-    def _sanitize_value(self, value: Any) -> Any:
-        """Convert a single value to a JSON-serializable format.
-        
-        Args:
-            value: Any Python value to be sanitized
-            
-        Returns:
-            A JSON-serializable version of the value
-        """
-        if isinstance(value, ObjectId):
-            return str(value)
-        elif isinstance(value, datetime):
-            return value.isoformat()
-        elif isinstance(value, dict):
-            return {k: self._sanitize_value(v) for k, v in value.items()}
-        elif isinstance(value, list):
-            return [self._sanitize_value(item) for item in value]
-        else:
-            return value
-
     async def detect_changes(self, city: str, current_data: Dict) -> Dict[str, Dict]:
         """
         Detect changes in appointment data for a city.
@@ -543,7 +436,18 @@ class AppointmentMonitor:
         """
         previous_data = await self.db.get_last_appointment_data(city)
         if not previous_data:
-            return {}  # No previous data to compare with
+            # For new cities, treat all available slots as changes
+            changes = {}
+            for country_data in current_data.get("countries", []):
+                country = country_data["country"]
+                if any(slots and slots != "0" for slots in country_data["slots"].values()):
+                    changes[country] = {
+                        "type": "new_availability",
+                        "slots": country_data["slots"],
+                        "earliest_date": country_data["earliest_available"],
+                        "url": country_data["url"]
+                    }
+            return changes
         
         changes = {}
         
@@ -559,25 +463,41 @@ class AppointmentMonitor:
             
             if not previous_country_data:
                 # New country with slots
-                if country_data["earliest_available"]:
+                if any(slots and slots != "0" for slots in country_data["slots"].values()):
                     changes[country] = {
-                        "new_slots": "New availability",
-                        "earliest_date": country_data["earliest_available"]
+                        "type": "new_country",
+                        "slots": country_data["slots"],
+                        "earliest_date": country_data["earliest_available"],
+                        "url": country_data["url"]
                     }
                 continue
             
-            # Check for new slots or earlier dates
+            # Check for changes in slots
             current_slots = country_data["slots"]
             previous_slots = previous_country_data["slots"]
             
             for month, slots in current_slots.items():
-                if slots and slots != "0" and (
-                    not previous_slots.get(month) or 
-                    previous_slots[month] == "0"
-                ):
+                # Convert slot values to integers for comparison
+                current_value = int(slots.replace("+", "")) if slots and slots != "0" else 0
+                previous_value = int(previous_slots.get(month, "0").replace("+", "")) if previous_slots.get(month) else 0
+                
+                if current_value > previous_value:
                     changes[country] = {
-                        "new_slots": f"{slots} slots in {month}",
-                        "earliest_date": country_data["earliest_available"]
+                        "type": "increased_availability",
+                        "month": month,
+                        "previous_slots": previous_slots.get(month, "0"),
+                        "new_slots": slots,
+                        "earliest_date": country_data["earliest_available"],
+                        "url": country_data["url"]
+                    }
+                    break
+                elif current_value > 0 and previous_value == 0:
+                    changes[country] = {
+                        "type": "new_slots",
+                        "month": month,
+                        "slots": slots,
+                        "earliest_date": country_data["earliest_available"],
+                        "url": country_data["url"]
                     }
                     break
         
@@ -592,18 +512,50 @@ class AppointmentMonitor:
         if not users:
             return
         
-        notification_data = NotificationData(
-            city=city,
-            changes=changes,
-            timestamp=datetime.now()
-        )
-        
-        for user in users:
-            await self.notification_service.notify_user(
-                email=user.get("email"),
-                phone=user.get("phone"),
-                data=notification_data
+        for country, change_data in changes.items():
+            notification_message = self._create_notification_message(city, country, change_data)
+            notification_data = NotificationData(
+                city=city,
+                country=country,
+                message=notification_message,
+                change_type=change_data["type"],
+                url=change_data.get("url", ""),
+                timestamp=datetime.now()
             )
+            
+            for user in users:
+                await self.notification_service.notify_user(
+                    email=user.get("email"),
+                    phone=user.get("phone"),
+                    data=notification_data
+                )
+    
+    def _create_notification_message(self, city: str, country: str, change_data: Dict) -> str:
+        """Create a detailed notification message based on the change type."""
+        base_message = f"🔔 New visa appointment availability in {city} for {country}!\n\n"
+        
+        if change_data["type"] == "new_availability":
+            slots_info = ", ".join(f"{month}: {slots}" for month, slots in change_data["slots"].items() if slots and slots != "0")
+            message = f"{base_message}Available slots found: {slots_info}"
+        
+        elif change_data["type"] == "new_country":
+            slots_info = ", ".join(f"{month}: {slots}" for month, slots in change_data["slots"].items() if slots and slots != "0")
+            message = f"{base_message}New country added with available slots: {slots_info}"
+        
+        elif change_data["type"] == "increased_availability":
+            message = (f"{base_message}Increased availability in {change_data['month']}!\n"
+                      f"Previous: {change_data['previous_slots']} → New: {change_data['new_slots']}")
+        
+        elif change_data["type"] == "new_slots":
+            message = f"{base_message}New slots available in {change_data['month']}: {change_data['slots']}"
+        
+        if change_data.get("earliest_date"):
+            message += f"\nEarliest available date: {change_data['earliest_date']}"
+        
+        if change_data.get("url"):
+            message += f"\n\nBook now: {change_data['url']}"
+        
+        return message
 
     async def monitor_appointments(self):
         """Main monitoring function that runs every minute."""
@@ -614,15 +566,12 @@ class AppointmentMonitor:
         
         try:
             # Set up the crawler at the start of the monitoring cycle
-            logger.info("Initializing crawler for monitoring cycle...")
             crawler_initialized = await self.setup_crawler()
             
             if not crawler_initialized:
                 logger.error("Failed to initialize crawler at start of monitoring cycle, aborting")
                 return
                 
-            logger.info("Crawler initialized successfully, beginning city monitoring")
-            
             # Monitor each city
             for country, cities in self.cities_by_country.items():
                 for city in cities:
@@ -644,8 +593,6 @@ class AppointmentMonitor:
                                 await self.db.save_appointment_data(city, error_data)
                                 continue
                                 
-                            logger.info("Crawler reinitialized successfully")
-                            
                         # Extract current appointment data
                         current_data = await self.extract_appointment_data(city)
                         
@@ -670,12 +617,9 @@ class AppointmentMonitor:
                         
                         # Try to recover the crawler for next city
                         try:
-                            logger.info(f"Attempting to recover crawler after error in {city}")
                             await self.cleanup_crawler()
                             crawler_initialized = await self.setup_crawler()
-                            if crawler_initialized:
-                                logger.info("Successfully recovered crawler")
-                            else:
+                            if not crawler_initialized:
                                 logger.error("Failed to recover crawler, will retry on next city")
                         except Exception as recovery_error:
                             logger.error(f"Failed to recover crawler: {recovery_error}")
@@ -684,79 +628,16 @@ class AppointmentMonitor:
                     # Add a small delay between cities to avoid rate limiting
                     await asyncio.sleep(2)
             
-            # Send combined results to webhook if configured
-            if self.webhook_enabled and all_results:
-                try:
-                    # Create a JSON-serializable copy of the results, with explicit pre-conversion of ObjectIds
-                    # Process in two steps with additional safeguards for ObjectId serialization
-                    logger.info("Preparing webhook payload with JSON serialization safeguards")
-                    
-                    # Pre-process to convert all ObjectId instances
-                    sanitized_results = self._deep_sanitize_for_serialization(all_results)
-                    
-                    # Now safely convert to JSON
-                    try:
-                        json_str = json.dumps(sanitized_results, cls=MongoJSONEncoder)
-                        serializable_results = json.loads(json_str)
-                    except TypeError as json_error:
-                        logger.error(f"JSON serialization error despite pre-sanitization: {json_error}")
-                        # Fall back to our more heavy-duty sanitization approach
-                        logger.warning("Using fallback sanitization for webhook payload")
-                        json_str = self._sanitize_for_json(all_results)
-                        serializable_results = json.loads(json_str)
-                    
-                    webhook_payload = {
-                        "timestamp": datetime.now().isoformat(),
-                        "results": serializable_results
-                    }
-                    
-                    logger.info(f"Sending webhook with data for {len(all_results)} cities")
-                    success = await self.send_webhook(webhook_payload)
-                    if success:
-                        logger.info("Successfully sent webhook data")
-                    else:
-                        logger.warning("Webhook delivery reported failure")
-                except Exception as webhook_error:
-                    logger.error(f"Error preparing or sending webhook payload: {webhook_error}")
-                    logger.exception("Detailed webhook error")  # Log full traceback
-            
         except Exception as e:
             logger.error(f"Error in monitoring cycle: {e}")
-            logger.info("Attempting to reinitialize crawler on next cycle")
         finally:
             # Clean up the crawler after the monitoring cycle
             if crawler_initialized:
                 try:
-                    logger.info("Cleaning up crawler at end of monitoring cycle")
                     await self.cleanup_crawler()
-                    logger.info("Crawler cleanup completed")
                 except Exception as cleanup_error:
                     logger.error(f"Error during crawler cleanup: {cleanup_error}")
-                    # Force crawler to None to ensure we don't reuse a potentially corrupted instance
                     self.crawler = None
-
-    def _deep_sanitize_for_serialization(self, data: Any) -> Any:
-        """Deep sanitize data for JSON serialization, converting all ObjectId instances to strings.
-        
-        This method traverses nested data structures and converts problematic types to serializable ones.
-        
-        Args:
-            data: The data structure to sanitize (dict, list, etc.)
-            
-        Returns:
-            The sanitized data structure with all problematic types converted to serializable ones
-        """
-        if isinstance(data, list):
-            return [self._deep_sanitize_for_serialization(item) for item in data]
-        elif isinstance(data, dict):
-            return {k: self._deep_sanitize_for_serialization(v) for k, v in data.items()}
-        elif isinstance(data, ObjectId):
-            return str(data)
-        elif isinstance(data, datetime):
-            return data.isoformat()
-        # Add any other problematic types here (e.g., Decimal, etc.)
-        else:
-            return data
 
 async def run_scheduler():
     """Run the scheduler in the background."""
@@ -773,7 +654,6 @@ async def main():
         schedule.every(1).minutes.do(lambda: asyncio.create_task(monitor.monitor_appointments()))
         
         logger.info("Starting appointment monitoring service...")
-        logger.info(f"Webhook enabled: {monitor.webhook_enabled}")
         logger.info(f"Monitoring cities: {json.dumps(monitor.cities_by_country, indent=2)}")
         
         # Run the scheduler in the background

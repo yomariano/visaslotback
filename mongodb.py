@@ -22,7 +22,7 @@ class MongoDBClient:
         self.db = self.client[self.db_name]
         
     async def save_appointment_data(self, city: str, data: Dict) -> bool:
-        """Save appointment data to MongoDB."""
+        """Save appointment data to MongoDB using upsert operation."""
         try:
             # Add timestamp if not present
             if "timestamp" not in data:
@@ -31,8 +31,13 @@ class MongoDBClient:
             # Add city as a key field if not present
             data["city"] = city
             
-            await self.db[self.appointments_collection].insert_one(data)
-            logger.info(f"Saved appointment data for {city}")
+            # Use update_one with upsert=True to update existing record or create new one
+            await self.db[self.appointments_collection].update_one(
+                {"city": city},  # filter by city
+                {"$set": data},  # update data
+                upsert=True  # create if doesn't exist
+            )
+            logger.info(f"Updated appointment data for {city}")
             return True
         except Exception as e:
             logger.error(f"Error saving appointment data for {city}: {e}")
@@ -53,8 +58,9 @@ class MongoDBClient:
     async def get_users_by_city(self, city: str) -> List[Dict]:
         """Get all users monitoring a specific city."""
         try:
-            cursor = self.db[self.users_collection].find({"monitored_cities": city})
+            cursor = self.db[self.users_collection].find({"cityFrom": city})
             users = await cursor.to_list(length=None)
+            logger.info(f"Found {len(users)} users monitoring city: {city}")
             return users
         except Exception as e:
             logger.error(f"Error getting users for city {city}: {e}")
