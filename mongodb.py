@@ -5,8 +5,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from loguru import logger
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from .env file only if they're not already set
+load_dotenv(override=False)
 
 class MongoDBClient:
     def __init__(self):
@@ -18,6 +18,7 @@ class MongoDBClient:
         if not self.uri:
             raise ValueError("MongoDB URI not found in environment variables")
         
+        logger.info(f"Connecting to MongoDB database: {self.db_name}")
         self.client = AsyncIOMotorClient(self.uri)
         self.db = self.client[self.db_name]
         
