@@ -79,6 +79,11 @@ class AppointmentMonitor:
         # Initialize MongoDB client and notification service
         self.db = MongoDBClient()
         self.notification_service = NotificationService()
+        
+        # Add monitoring flag to prevent concurrent runs
+        self.monitoring_in_progress = False
+        self.last_monitoring_start = None
+        self.last_monitoring_end = None
 
     async def setup_crawler(self) -> bool:
         """Initialize the crawler if it hasn't been set up yet.
@@ -559,6 +564,22 @@ class AppointmentMonitor:
 
     async def monitor_appointments(self):
         """Main monitoring function that runs every minute."""
+        # Check if monitoring is already in progress
+        if self.monitoring_in_progress:
+            duration_since_start = None
+            if self.last_monitoring_start:
+                duration_since_start = (datetime.now() - self.last_monitoring_start).total_seconds()
+                logger.warning(
+                    f"Skipping monitoring cycle - previous cycle still running "
+                    f"(started {duration_since_start:.1f} seconds ago)"
+                )
+            else:
+                logger.warning("Skipping monitoring cycle - previous cycle still running")
+            return
+        
+        # Set monitoring flag and timestamp
+        self.monitoring_in_progress = True
+        self.last_monitoring_start = datetime.now()
         logger.info("Starting appointment monitoring cycle...")
         
         all_results = []
@@ -638,6 +659,12 @@ class AppointmentMonitor:
                 except Exception as cleanup_error:
                     logger.error(f"Error during crawler cleanup: {cleanup_error}")
                     self.crawler = None
+            
+            # Reset monitoring flag and update timestamps
+            self.monitoring_in_progress = False
+            self.last_monitoring_end = datetime.now()
+            duration = (self.last_monitoring_end - self.last_monitoring_start).total_seconds()
+            logger.info(f"Completed monitoring cycle in {duration:.1f} seconds")
 
 async def run_scheduler():
     """Run the scheduler in the background."""
