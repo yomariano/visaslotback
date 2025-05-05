@@ -17,8 +17,8 @@ from loguru import logger
 from notification_service import NotificationService, NotificationData
 from mongodb import MongoDBClient
 
-# Load environment variables
-load_dotenv()
+# Load environment variables from .env file only if they're not already set
+load_dotenv(override=False)
 
 # Configure logging
 logger.add(

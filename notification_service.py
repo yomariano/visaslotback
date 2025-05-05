@@ -8,7 +8,8 @@ from email.mime.multipart import MIMEMultipart
 from twilio.rest import Client
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load environment variables from .env file only if they're not already set
+load_dotenv(override=False)
 
 @dataclass
 class NotificationData:
