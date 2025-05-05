@@ -36,6 +36,10 @@ apt-get update && apt-get install -y \
     libatspi2.0-0 \
     libgtk-3-0
 
+# Install Python dependencies
+echo "Installing Python dependencies..."
+pip install -r requirements.txt
+
 # Install Playwright if not already installed
 echo "Installing/Updating Playwright..."
 pip install playwright --upgrade
