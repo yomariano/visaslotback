@@ -4,6 +4,8 @@ import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from loguru import logger
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+import backoff
 
 # Load environment variables from .env file only if they're not already set
 load_dotenv(override=False)
@@ -19,11 +21,30 @@ class MongoDBClient:
             raise ValueError("MongoDB URI not found in environment variables")
         
         logger.info(f"Connecting to MongoDB database: {self.db_name}")
-        self.client = AsyncIOMotorClient(self.uri)
+        
+        # Configure client with more resilient settings
+        self.client = AsyncIOMotorClient(
+            self.uri,
+            serverSelectionTimeoutMS=30000,  # 30 seconds for server selection
+            connectTimeoutMS=30000,          # 30 seconds for initial connection
+            socketTimeoutMS=45000,           # 45 seconds for socket operations
+            maxPoolSize=50,                  # Increase connection pool size
+            minPoolSize=10,                  # Maintain minimum connections
+            maxIdleTimeMS=60000,            # Close idle connections after 60 seconds
+            waitQueueTimeoutMS=30000,       # How long to wait for available connection
+            retryWrites=True,               # Enable automatic retry of write operations
+            retryReads=True                 # Enable automatic retry of read operations
+        )
         self.db = self.client[self.db_name]
         
+    @backoff.on_exception(
+        backoff.expo,
+        (ConnectionFailure, ServerSelectionTimeoutError),
+        max_tries=3,
+        max_time=30
+    )
     async def save_appointment_data(self, city: str, data: Dict) -> bool:
-        """Save appointment data to MongoDB using upsert operation."""
+        """Save appointment data to MongoDB using upsert operation with retry logic."""
         try:
             # Add timestamp if not present
             if "timestamp" not in data:
