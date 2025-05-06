@@ -48,6 +48,9 @@ pip install playwright --upgrade
 echo "Installing Playwright browser dependencies..."
 playwright install chromium
 
-# Start the application
-echo "Starting appointment monitor..."
-exec python3 appointment_monitor.py 
+# Make restart script executable
+chmod +x restart_monitor.sh
+
+# Start the application with auto-restart capability
+echo "Starting appointment monitor with auto-restart capability..."
+exec ./restart_monitor.sh 

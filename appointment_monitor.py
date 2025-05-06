@@ -75,6 +75,7 @@ class AppointmentMonitor:
         
         # Initialize crawler as None - will be set up when needed
         self.crawler = None
+        self._initializing_crawler = False
         
         # Initialize MongoDB client and notification service
         self.db = MongoDBClient()
@@ -92,13 +93,31 @@ class AppointmentMonitor:
             bool: True if initialization was successful, False otherwise.
         """
         try:
-            if self.crawler is None:
-                self.crawler = await AsyncWebCrawler(config=self.browser_config).__aenter__()
+            # Check if crawler already exists and is valid
+            if self.crawler is not None:
                 return True
-            return True  # Already initialized
+
+            # Use a flag to prevent recursive calls
+            if self._initializing_crawler:
+                logger.warning("Avoiding recursive setup_crawler call")
+                return False
+                
+            # Set flag to indicate we're initializing
+            self._initializing_crawler = True
+            
+            # Create a new crawler instance
+            self.crawler = await AsyncWebCrawler(config=self.browser_config).__aenter__()
+            
+            # Reset the initialization flag
+            self._initializing_crawler = False
+            
+            return True
         except Exception as e:
             logger.error(f"Error initializing crawler: {e}")
+            # Ensure crawler is set to None on failure
             self.crawler = None
+            # Reset the initialization flag
+            self._initializing_crawler = False
             return False
 
     async def cleanup_crawler(self):
@@ -110,6 +129,8 @@ class AppointmentMonitor:
                 logger.error(f"Error cleaning up crawler: {e}")
             finally:
                 self.crawler = None
+                # Ensure the initialization flag is reset
+                self._initializing_crawler = False
 
     async def cleanup(self):
         """Clean up all resources used by the monitor."""
@@ -148,6 +169,9 @@ class AppointmentMonitor:
                 crawler_valid = self.crawler is not None
                 if not crawler_valid:
                     logger.warning(f"Crawler not initialized when processing {city}, initializing new instance...")
+                    
+                    # Reset initialization flag to avoid recursion
+                    self._initializing_crawler = False
                     crawler_valid = await self.setup_crawler()
                 
                 if not crawler_valid:
@@ -194,7 +218,11 @@ class AppointmentMonitor:
                         if retry_count <= max_retries:
                             logger.info(f"Attempting to create fresh crawler for {city}, retry {retry_count}/{max_retries}")
                             await asyncio.sleep(1)  # Brief pause before retry
+                            
+                            # Reset initialization flag to avoid recursion
+                            self._initializing_crawler = False
                             crawler_valid = await self.setup_crawler()
+                            
                             if crawler_valid:
                                 logger.info(f"Successfully initialized new crawler for retry {retry_count}")
                                 continue
@@ -220,6 +248,9 @@ class AppointmentMonitor:
                         logger.info(f"Creating new crawler instance and retrying (attempt {retry_count}/{max_retries})...")
                         # Completely clean up and create a new crawler instance
                         await self.cleanup_crawler()
+                        
+                        # Reset initialization flag to avoid recursion
+                        self._initializing_crawler = False
                         if await self.setup_crawler():
                             logger.info(f"Successfully created new crawler for retry {retry_count}")
                             continue
@@ -586,6 +617,13 @@ class AppointmentMonitor:
         crawler_initialized = False
         
         try:
+            # Ensure we don't have a stale crawler instance
+            if self.crawler is not None:
+                await self.cleanup_crawler()
+                
+            # Reset initialization flag to avoid stale state
+            self._initializing_crawler = False
+            
             # Set up the crawler at the start of the monitoring cycle
             crawler_initialized = await self.setup_crawler()
             
@@ -602,6 +640,9 @@ class AppointmentMonitor:
                         # Verify crawler is still valid before proceeding
                         if self.crawler is None:
                             logger.warning("Crawler became invalid, attempting to reinitialize...")
+                            
+                            # Reset the initialization flag before trying again
+                            self._initializing_crawler = False
                             crawler_initialized = await self.setup_crawler()
                             
                             if not crawler_initialized:
@@ -639,6 +680,8 @@ class AppointmentMonitor:
                         # Try to recover the crawler for next city
                         try:
                             await self.cleanup_crawler()
+                            # Reset initialization flag
+                            self._initializing_crawler = False
                             crawler_initialized = await self.setup_crawler()
                             if not crawler_initialized:
                                 logger.error("Failed to recover crawler, will retry on next city")
@@ -653,12 +696,13 @@ class AppointmentMonitor:
             logger.error(f"Error in monitoring cycle: {e}")
         finally:
             # Clean up the crawler after the monitoring cycle
-            if crawler_initialized:
+            if self.crawler is not None:
                 try:
                     await self.cleanup_crawler()
                 except Exception as cleanup_error:
                     logger.error(f"Error during crawler cleanup: {cleanup_error}")
                     self.crawler = None
+                    self._initializing_crawler = False
             
             # Reset monitoring flag and update timestamps
             self.monitoring_in_progress = False
@@ -674,25 +718,56 @@ async def run_scheduler():
 
 async def main():
     """Main function to start the monitoring process."""
-    monitor = AppointmentMonitor()
+    max_restarts = 3
+    restart_count = 0
+    restart_wait_time = 60  # seconds to wait between restarts
     
-    try:
-        # Schedule monitoring every minute
-        schedule.every(1).minutes.do(lambda: asyncio.create_task(monitor.monitor_appointments()))
-        
-        logger.info("Starting appointment monitoring service...")
-        logger.info(f"Monitoring cities: {json.dumps(monitor.cities_by_country, indent=2)}")
-        
-        # Run the scheduler in the background
-        await run_scheduler()
-    except KeyboardInterrupt:
-        logger.info("Received shutdown signal. Cleaning up...")
-    except Exception as e:
-        logger.error(f"Unexpected error in main function: {e}")
-    finally:
-        # Clean up resources
-        await monitor.cleanup()
-        logger.info("Appointment monitoring service stopped.")
+    while restart_count <= max_restarts:
+        monitor = None
+        try:
+            # Create a new monitor instance
+            monitor = AppointmentMonitor()
+            
+            # Run the first monitoring cycle immediately to verify everything works
+            logger.info("Running initial test monitoring cycle...")
+            await monitor.monitor_appointments()
+            
+            # Schedule regular monitoring every minute
+            schedule.every(1).minutes.do(lambda: asyncio.create_task(monitor.monitor_appointments()))
+            
+            logger.info("Starting appointment monitoring service...")
+            logger.info(f"Monitoring cities: {json.dumps(monitor.cities_by_country, indent=2)}")
+            
+            # Run the scheduler in the background
+            await run_scheduler()
+            
+        except KeyboardInterrupt:
+            logger.info("Received shutdown signal. Cleaning up...")
+            break
+            
+        except Exception as e:
+            logger.error(f"Unexpected error in main function: {e}")
+            restart_count += 1
+            
+            if restart_count <= max_restarts:
+                logger.warning(f"Restarting monitoring service (attempt {restart_count}/{max_restarts}) in {restart_wait_time} seconds...")
+                # Clean up resources before restart if monitor was created
+                if monitor:
+                    await monitor.cleanup()
+                # Wait before restarting
+                await asyncio.sleep(restart_wait_time)
+                # Increase wait time for next restart
+                restart_wait_time *= 2
+            else:
+                logger.critical(f"Exceeded maximum restart attempts ({max_restarts}). Service will terminate.")
+                break
+                
+        finally:
+            # Clean up resources if we're exiting the loop
+            if monitor and (restart_count > max_restarts or isinstance(sys.exc_info()[1], KeyboardInterrupt)):
+                await monitor.cleanup()
+                logger.info("Appointment monitoring service stopped.")
 
 if __name__ == "__main__":
+    import sys
     asyncio.run(main()) 
