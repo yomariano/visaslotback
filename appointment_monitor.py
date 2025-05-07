@@ -163,21 +163,35 @@ class AppointmentMonitor:
             logger.info("Initializing crawler with memory optimization")
             
             try:
-                # Use a simple approach to create the crawler with timeout
-                self.crawler = await asyncio.wait_for(
-                    AsyncWebCrawler(config=self.browser_config).__aenter__(),
-                    timeout=30  # 30 second timeout for initialization
-                )
+                # Create browser configuration
+                browser_config = self.browser_config
                 
-                # Verify the crawler has necessary methods
-                if not hasattr(self.crawler, 'arun'):
-                    logger.error("Crawler is missing required 'arun' method")
-                    self.crawler = None
-                    self._initializing_crawler = False
-                    return False
+                # Create the crawler directly without using __aenter__ in a way that could cause recursion
+                crawler = AsyncWebCrawler(config=browser_config)
+                
+                # Manually initialize the crawler with timeout
+                # This avoids the potential recursion in __aenter__
+                try:
+                    self.crawler = crawler
+                    # Use a direct timeout approach for browser initialization
+                    await asyncio.wait_for(
+                        self._initialize_browser(crawler),
+                        timeout=30  # 30 second timeout for initialization
+                    )
                     
-                logger.info("Successfully initialized crawler with memory optimization")
-                return True
+                    # Verify the crawler has necessary methods
+                    if not hasattr(self.crawler, 'arun'):
+                        logger.error("Crawler is missing required 'arun' method")
+                        self.crawler = None
+                        self._initializing_crawler = False
+                        return False
+                        
+                    logger.info("Successfully initialized crawler with memory optimization")
+                    return True
+                except asyncio.TimeoutError:
+                    logger.error("Timeout while initializing crawler browser")
+                    self.crawler = None
+                    return False
                 
             except asyncio.TimeoutError:
                 logger.error("Timeout while initializing crawler")
@@ -195,6 +209,27 @@ class AppointmentMonitor:
         finally:
             # Always reset the initialization flag when exiting this method
             self._initializing_crawler = False
+    
+    async def _initialize_browser(self, crawler):
+        """Helper method to safely initialize the browser component of the crawler.
+        
+        This is separated to avoid recursion issues with __aenter__.
+        """
+        try:
+            # If the crawler has a browser initialization method, use it
+            if hasattr(crawler, 'init_browser'):
+                await crawler.init_browser()
+            # Or if it has a browser property that needs to be initialized
+            elif hasattr(crawler, 'browser') and crawler.browser is None and hasattr(crawler, '_setup_browser'):
+                await crawler._setup_browser()
+            # Fallback to trying __aenter__ if no other methods are available
+            else:
+                await crawler.__aenter__()
+            
+            return True
+        except Exception as e:
+            logger.error(f"Error in browser initialization: {e}")
+            raise
 
     async def cleanup_crawler(self):
         """Clean up the crawler instance with aggressive memory cleanup."""
@@ -744,26 +779,44 @@ class AppointmentMonitor:
                 batch = all_cities[i:i+batch_size]
                 logger.info(f"Processing batch {i//batch_size + 1} of {(len(all_cities) + batch_size - 1) // batch_size}")
                 
-                # Create a fresh crawler for each batch
-                await self.cleanup_crawler()
-                
-                # Make sure initialization flag is clear
-                self._initializing_crawler = False
-                
-                # Try to initialize the crawler with protection against recursive calls
-                if self._initializing_crawler:
-                    logger.error(f"Cannot initialize crawler for batch {i//batch_size + 1} - another initialization is in progress")
-                    await asyncio.sleep(5)
-                    continue
+                try:
+                    # Create a fresh crawler for each batch
+                    await self.cleanup_crawler()
                     
-                # Initialize crawler for this batch
-                crawler_initialized = await self.setup_crawler()
+                    # Make sure initialization flag is clear
+                    self._initializing_crawler = False
+                    
+                    # Try to initialize the crawler with protection against recursive calls
+                    if self._initializing_crawler:
+                        logger.error(f"Cannot initialize crawler for batch {i//batch_size + 1} - another initialization is in progress")
+                        await asyncio.sleep(5)
+                        continue
+                        
+                    # Initialize crawler for this batch
+                    crawler_initialized = await self.setup_crawler()
+                    
+                    if not crawler_initialized:
+                        logger.error(f"Failed to initialize crawler for batch {i//batch_size + 1}, skipping batch")
+                        # Sleep briefly before attempting next batch
+                        await asyncio.sleep(5)
+                        continue
                 
-                if not crawler_initialized:
-                    logger.error(f"Failed to initialize crawler for batch {i//batch_size + 1}, skipping batch")
-                    # Sleep briefly before attempting next batch
-                    await asyncio.sleep(5)
-                    continue
+                except RecursionError as rec_err:
+                    # Handle recursion errors directly in the monitoring cycle
+                    logger.critical(f"Recursion error during batch initialization: {rec_err}")
+                    
+                    # Try to recover using our custom recovery mechanism
+                    recovery_successful = await recover_from_recursion_error(self)
+                    
+                    if recovery_successful:
+                        logger.info(f"Successfully recovered from recursion error in batch {i//batch_size + 1}, continuing with next batch")
+                        # Skip current batch after a recursion error, even if recovery was successful
+                        await asyncio.sleep(5)
+                        continue
+                    else:
+                        logger.critical(f"Failed to recover from recursion error in batch {i//batch_size + 1}, skipping batch")
+                        await asyncio.sleep(10)  # Longer pause after failed recovery
+                        continue
                 
                 # Process each city in the batch
                 for country, city in batch:
@@ -814,6 +867,22 @@ class AppointmentMonitor:
                                     await self.notify_users(city, changes)
                             
                             all_results.append(current_data)
+                    except RecursionError as rec_err:
+                        logger.critical(f"Recursion error processing {city}: {rec_err}")
+                        
+                        # Try to recover
+                        recovery_successful = await recover_from_recursion_error(self)
+                        
+                        # Save error data regardless of recovery success
+                        error_data = {
+                            "city": city, 
+                            "error": f"Recursion error: {str(rec_err)}", 
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        await self.db.save_appointment_data(city, error_data)
+                        
+                        # Skip to next city after attempting recovery
+                        continue
                     except Exception as city_error:
                         logger.error(f"Error processing {city}: {city_error}")
                         # Save minimal error data to keep history consistent
@@ -832,6 +901,10 @@ class AppointmentMonitor:
                 # Sleep briefly between batches to let system resources recover
                 await asyncio.sleep(5)
             
+        except RecursionError as rec_err:
+            logger.critical(f"Recursion error in main monitoring cycle: {rec_err}")
+            # Always attempt recovery for recursion errors
+            await recover_from_recursion_error(self)
         except Exception as e:
             logger.error(f"Error in monitoring cycle: {e}")
         finally:
@@ -870,28 +943,58 @@ async def recover_from_recursion_error(monitor=None):
     try:
         # 1. Force garbage collection
         import gc
+        import sys
         gc.collect()
         
-        # 2. If we have a monitor instance, reset it completely
+        # 2. Check current recursion limit and temporarily increase it if needed
+        current_limit = sys.getrecursionlimit()
+        logger.info(f"Current recursion limit: {current_limit}")
+        
+        try:
+            # Temporarily increase the recursion limit to help with recovery
+            if current_limit < 2000:
+                new_limit = min(current_limit * 2, 2000)  # Double but cap at 2000
+                logger.info(f"Temporarily increasing recursion limit to {new_limit}")
+                sys.setrecursionlimit(new_limit)
+        except Exception as limit_error:
+            logger.error(f"Error adjusting recursion limit: {limit_error}")
+        
+        # 3. If we have a monitor instance, aggressively reset it
         if monitor:
             try:
-                # Force reset crawler flags
+                # Force reset crawler flags and references - most important step
                 monitor.crawler = None
                 monitor._initializing_crawler = False
                 
+                # Safety check - force reset all browser references 
+                if hasattr(monitor, 'browser') and monitor.browser:
+                    monitor.browser = None
+                
                 # Attempt to clean up any resources
                 try:
-                    await monitor.cleanup()
+                    # Use only cleanup_crawler, not the full cleanup to avoid potential recursion
+                    await monitor.cleanup_crawler()
                 except Exception as e:
                     logger.error(f"Error during monitor cleanup in recovery: {e}")
+                    # Even if cleanup fails, ensure flags are reset
+                    monitor.crawler = None
+                    monitor._initializing_crawler = False
             except Exception as e:
                 logger.error(f"Error resetting monitor in recovery: {e}")
                 
-        # 3. Additional step - sleep briefly to allow any pending async tasks to resolve
-        await asyncio.sleep(2)
+        # 4. Sleep to allow any pending async tasks to resolve
+        await asyncio.sleep(5)  # Extended sleep time 
         
-        # Force another garbage collection
+        # 5. Force another garbage collection cycle
         gc.collect()
+        
+        # 6. Reset recursion limit to original value if we changed it
+        try:
+            if sys.getrecursionlimit() != current_limit:
+                logger.info(f"Resetting recursion limit to original value: {current_limit}")
+                sys.setrecursionlimit(current_limit)
+        except Exception as limit_reset_error:
+            logger.error(f"Error resetting recursion limit: {limit_reset_error}")
         
         logger.info("Recovery steps completed, system should be in a clean state")
         return True
@@ -906,15 +1009,38 @@ async def main():
     restart_count = 0
     restart_wait_time = 60  # seconds to wait between restarts
     
+    # System-level protection - ensure a reasonable recursion limit
+    try:
+        import sys
+        current_limit = sys.getrecursionlimit()
+        # Set a higher recursion limit if the default is too low
+        if current_limit < 1500:
+            logger.info(f"Increasing default recursion limit from {current_limit} to 1500")
+            sys.setrecursionlimit(1500)
+    except Exception as limit_error:
+        logger.error(f"Error adjusting system recursion limit: {limit_error}")
+    
     while restart_count <= max_restarts:
         monitor = None
         try:
+            # Force garbage collection before creating monitor instance
+            import gc
+            gc.collect()
+            
             # Create a new monitor instance
             monitor = AppointmentMonitor()
             
             # Run the first monitoring cycle immediately to verify everything works
             logger.info("Running initial test monitoring cycle...")
-            await monitor.monitor_appointments()
+            try:
+                await monitor.monitor_appointments()
+            except RecursionError as rec_err:
+                logger.critical(f"Recursion error in initial monitoring cycle: {rec_err}")
+                # Attempt recovery before scheduling
+                recovery_successful = await recover_from_recursion_error(monitor)
+                if not recovery_successful:
+                    logger.critical("Failed to recover from recursion error in initial cycle")
+                    raise  # Re-raise to trigger restart
             
             # Schedule regular monitoring at a reduced frequency to prevent resource buildup
             # Changed from every 1 minute to every 5 minutes
