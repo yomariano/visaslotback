@@ -49,19 +49,30 @@ class AppointmentMonitor:
             "Miami", "New York", "San Francisco", "Seattle", "Washington DC"]
         }
         
-        # Initialize browser config
+        # Initialize browser config with memory management options
         self.browser_config = BrowserConfig(
             headless=True,
-            verbose=True
+            verbose=True,
+            args=[
+                '--disable-dev-shm-usage',  # Prevent memory issues in containers
+                '--no-sandbox',  # Required for running as non-root
+                '--disable-gpu',  # Reduce memory usage
+                '--disable-software-rasterizer',  # Reduce memory usage
+                '--disable-extensions',  # Disable unnecessary features
+                '--single-process',  # Use single process to prevent orphaned processes
+                '--memory-pressure-off',  # Prevent aggressive memory management
+                '--js-flags=--max-old-space-size=512'  # Limit JS heap size
+            ]
         )
         
-        # Initialize crawler config
+        # Initialize crawler config with timeout
         self.crawler_config = CrawlerRunConfig(
             cache_mode=CacheMode.BYPASS,  # Don't cache results since we need real-time data
             js_code=[
-                # Wait for dynamic content to load
-                "await new Promise(r => setTimeout(r, 2000));"
-            ]
+                # Wait for dynamic content to load with timeout
+                "await Promise.race([new Promise(r => setTimeout(r, 2000)), new Promise(r => setTimeout(() => r('timeout'), 10000))]);"
+            ],
+            timeout=15000  # 15 second timeout for operations
         )
         
         # Get next three months for slot tracking
@@ -76,6 +87,7 @@ class AppointmentMonitor:
         # Initialize crawler as None - will be set up when needed
         self.crawler = None
         self._initializing_crawler = False
+        self._last_crawler_cleanup = None
         
         # Initialize MongoDB client and notification service
         self.db = MongoDBClient()
@@ -87,12 +99,15 @@ class AppointmentMonitor:
         self.last_monitoring_end = None
 
     async def setup_crawler(self) -> bool:
-        """Initialize the crawler if it hasn't been set up yet.
-        
-        Returns:
-            bool: True if initialization was successful, False otherwise.
-        """
+        """Initialize the crawler if it hasn't been set up yet."""
         try:
+            # Force cleanup if it's been more than 5 minutes since last cleanup
+            current_time = datetime.now()
+            if (self._last_crawler_cleanup is None or 
+                (current_time - self._last_crawler_cleanup).total_seconds() > 300):
+                await self.cleanup_crawler()
+                self._last_crawler_cleanup = current_time
+
             # Check if crawler already exists and is valid
             if self.crawler is not None:
                 return True
@@ -105,8 +120,17 @@ class AppointmentMonitor:
             # Set flag to indicate we're initializing
             self._initializing_crawler = True
             
-            # Create a new crawler instance
-            self.crawler = await AsyncWebCrawler(config=self.browser_config).__aenter__()
+            # Create a new crawler instance with timeout
+            try:
+                self.crawler = await asyncio.wait_for(
+                    AsyncWebCrawler(config=self.browser_config).__aenter__(),
+                    timeout=30  # 30 second timeout for initialization
+                )
+            except asyncio.TimeoutError:
+                logger.error("Crawler initialization timed out")
+                self.crawler = None
+                self._initializing_crawler = False
+                return False
             
             # Reset the initialization flag
             self._initializing_crawler = False
@@ -121,16 +145,28 @@ class AppointmentMonitor:
             return False
 
     async def cleanup_crawler(self):
-        """Clean up the crawler instance."""
+        """Clean up the crawler instance and ensure Chrome processes are terminated."""
         if self.crawler is not None:
             try:
-                await self.crawler.__aexit__(None, None, None)
+                # Set a timeout for the cleanup operation
+                await asyncio.wait_for(
+                    self.crawler.__aexit__(None, None, None),
+                    timeout=10  # 10 second timeout for cleanup
+                )
+            except asyncio.TimeoutError:
+                logger.error("Crawler cleanup timed out")
             except Exception as e:
                 logger.error(f"Error cleaning up crawler: {e}")
             finally:
                 self.crawler = None
-                # Ensure the initialization flag is reset
                 self._initializing_crawler = False
+                
+                # Force garbage collection to free memory
+                import gc
+                gc.collect()
+                
+                # Update last cleanup timestamp
+                self._last_crawler_cleanup = datetime.now()
 
     async def cleanup(self):
         """Clean up all resources used by the monitor."""
@@ -600,13 +636,20 @@ class AppointmentMonitor:
             duration_since_start = None
             if self.last_monitoring_start:
                 duration_since_start = (datetime.now() - self.last_monitoring_start).total_seconds()
-                logger.warning(
-                    f"Skipping monitoring cycle - previous cycle still running "
-                    f"(started {duration_since_start:.1f} seconds ago)"
-                )
+                # Force cleanup if monitoring has been running too long (15 minutes)
+                if duration_since_start > 900:  # 15 minutes
+                    logger.warning(f"Forcing cleanup of stale monitoring cycle after {duration_since_start:.1f} seconds")
+                    self.monitoring_in_progress = False
+                    await self.cleanup_crawler()
+                else:
+                    logger.warning(
+                        f"Skipping monitoring cycle - previous cycle still running "
+                        f"(started {duration_since_start:.1f} seconds ago)"
+                    )
+                    return
             else:
                 logger.warning("Skipping monitoring cycle - previous cycle still running")
-            return
+                return
         
         # Set monitoring flag and timestamp
         self.monitoring_in_progress = True
@@ -615,11 +658,11 @@ class AppointmentMonitor:
         
         all_results = []
         crawler_initialized = False
+        cities_processed = 0
         
         try:
             # Ensure we don't have a stale crawler instance
-            if self.crawler is not None:
-                await self.cleanup_crawler()
+            await self.cleanup_crawler()
                 
             # Reset initialization flag to avoid stale state
             self._initializing_crawler = False
@@ -632,11 +675,23 @@ class AppointmentMonitor:
                 return
                 
             # Monitor each city
+            total_cities = sum(len(cities) for cities in self.cities_by_country.values())
+            
             for country, cities in self.cities_by_country.items():
                 for city in cities:
-                    logger.info(f"Checking appointments for {city}, {country}...")
+                    cities_processed += 1
+                    logger.info(f"Checking appointments for {city}, {country} ({cities_processed}/{total_cities})...")
                     
                     try:
+                        # Recreate crawler every 5 cities to prevent memory buildup
+                        if cities_processed % 5 == 0:
+                            logger.info("Performing routine crawler cleanup and recreation")
+                            await self.cleanup_crawler()
+                            crawler_initialized = await self.setup_crawler()
+                            if not crawler_initialized:
+                                logger.error(f"Failed to reinitialize crawler during routine cleanup, skipping remaining cities")
+                                break
+                        
                         # Verify crawler is still valid before proceeding
                         if self.crawler is None:
                             logger.warning("Crawler became invalid, attempting to reinitialize...")
@@ -671,6 +726,11 @@ class AppointmentMonitor:
                                     await self.notify_users(city, changes)
                             
                             all_results.append(current_data)
+                            
+                        # Force garbage collection after processing each city
+                        import gc
+                        gc.collect()
+                        
                     except Exception as city_error:
                         logger.error(f"Error processing {city}: {city_error}")
                         # Save minimal error data to keep history consistent
@@ -708,7 +768,7 @@ class AppointmentMonitor:
             self.monitoring_in_progress = False
             self.last_monitoring_end = datetime.now()
             duration = (self.last_monitoring_end - self.last_monitoring_start).total_seconds()
-            logger.info(f"Completed monitoring cycle in {duration:.1f} seconds")
+            logger.info(f"Completed monitoring cycle in {duration:.1f} seconds. Processed {cities_processed} cities.")
 
 async def run_scheduler():
     """Run the scheduler in the background."""
