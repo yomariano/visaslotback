@@ -49,37 +49,67 @@ class AppointmentMonitor:
             "Miami", "New York", "San Francisco", "Seattle", "Washington DC"]
         }
         
-        # Initialize browser config with memory optimization settings
+        # Define memory optimization arguments for Chrome
+        self.browser_optimization_args = [
+            "--disable-dev-shm-usage",  # Overcome limited /dev/shm in containers
+            "--disable-gpu",            # Disable GPU hardware acceleration
+            "--disable-extensions",     # Disable extensions to reduce memory
+            "--no-sandbox",             # Required for some environments
+            "--disable-setuid-sandbox", # Additional sandbox disabling
+            "--no-zygote",              # Don't fork zygote processes
+            "--disable-infobars",       # Don't show infobars
+            "--disable-features=TranslateUI,BlinkGenPropertyTrees",
+            "--disable-translate",      # Disable translate
+            "--blink-settings=imagesEnabled=false", # Disable images for memory saving
+            "--disable-dev-tools",      # Disable dev tools
+            "--mute-audio",             # Mute audio
+            "--memory-pressure-off",    # Turn off memory pressure signal
+            "--js-flags=--max_old_space_size=256" # Limit JS memory heap size
+        ]
+        
+        # Initialize browser config - only use the params we know are supported
         self.browser_config = BrowserConfig(
             headless=True,
-            verbose=True,
-            args=[
-                "--disable-dev-shm-usage",  # Overcome limited /dev/shm in containers
-                "--disable-gpu",            # Disable GPU hardware acceleration
-                "--disable-extensions",     # Disable extensions to reduce memory
-                "--single-process",         # Use single process architecture
-                "--no-sandbox",             # Required for some environments
-                "--disable-setuid-sandbox", # Additional sandbox disabling
-                "--no-zygote",              # Don't fork zygote processes
-                "--disable-infobars",       # Don't show infobars
-                "--disable-features=TranslateUI,BlinkGenPropertyTrees", # Disable features
-                "--disable-translate",      # Disable translate
-                "--blink-settings=imagesEnabled=false", # Disable images for memory saving
-                "--disable-dev-tools",      # Disable dev tools
-                "--mute-audio",             # Mute audio
-                "--memory-pressure-off",    # Turn off memory pressure signal
-                "--js-flags=--max_old_space_size=256" # Limit JS memory heap size
-            ]
+            verbose=True
         )
         
         # Initialize crawler config
-        self.crawler_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,  # Don't cache results since we need real-time data
-            js_code=[
-                # Wait for dynamic content to load
-                "await new Promise(r => setTimeout(r, 2000));"
-            ]
-        )
+        # Check if browser_args is supported in the signature
+        try:
+            from inspect import signature
+            run_sig = signature(CrawlerRunConfig.__init__)
+            browser_args_supported = "browser_args" in run_sig.parameters
+            
+            # Create configuration with or without browser_args
+            if browser_args_supported:
+                self.crawler_config = CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    js_code=["await new Promise(r => setTimeout(r, 2000));"],
+                    browser_args=self.browser_optimization_args
+                )
+                logger.info("Created crawler config with browser_args parameter")
+            else:
+                self.crawler_config = CrawlerRunConfig(
+                    cache_mode=CacheMode.BYPASS,
+                    js_code=["await new Promise(r => setTimeout(r, 2000));"]
+                )
+                # Try to set browser_args as an attribute if the parameter isn't supported
+                # but the attribute might be
+                try:
+                    self.crawler_config.browser_args = self.browser_optimization_args
+                    logger.info("Set browser_args as attribute on crawler config")
+                except Exception as attr_err:
+                    logger.warning(f"Could not set browser_args attribute: {attr_err}")
+                    logger.warning("Browser memory optimization will be limited")
+        
+        except Exception as config_err:
+            logger.error(f"Error determining CrawlerRunConfig parameters: {config_err}")
+            # Fallback to basic configuration
+            self.crawler_config = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                js_code=["await new Promise(r => setTimeout(r, 2000));"]
+            )
+            logger.warning("Using fallback crawler configuration without memory optimizations")
         
         # Get next three months for slot tracking
         current_month = datetime.now().month
@@ -131,6 +161,9 @@ class AppointmentMonitor:
             
             # Create a new crawler instance with explicit timeout
             try:
+                # Log the browser configuration we're using
+                logger.info("Initializing crawler with memory optimization")
+                
                 self.crawler = await asyncio.wait_for(
                     AsyncWebCrawler(config=self.browser_config).__aenter__(),
                     timeout=30  # 30 second timeout for initialization
@@ -258,6 +291,7 @@ class AppointmentMonitor:
                     if current_crawler is None:
                         raise AttributeError("Crawler is None, cannot call arun")
                     
+                    # Ensure we're using the config with browser optimizations
                     result = await current_crawler.arun(
                         url=city_url,
                         config=self.crawler_config
@@ -825,6 +859,18 @@ async def main():
             
         except Exception as e:
             logger.error(f"Unexpected error in main function: {e}")
+            
+            # Check if the error is related to configuration
+            if "BrowserConfig" in str(e) or "CrawlerRunConfig" in str(e):
+                logger.critical(f"Critical configuration error detected: {e}")
+                logger.critical("This appears to be an issue with the crawl4ai library configuration.")
+                logger.critical("Please check the crawl4ai library documentation for correct configuration parameters.")
+                
+                # If this is a recurring configuration error, we should break to avoid constant restarts
+                if restart_count > 0:
+                    logger.critical("Multiple configuration errors detected. Stopping service.")
+                    break
+            
             restart_count += 1
             
             if restart_count <= max_restarts:
@@ -863,6 +909,51 @@ async def force_cleanup():
     except Exception as e:
         logger.error(f"Error during forced cleanup: {e}")
 
+async def diagnose_crawler_config():
+    """Diagnostic function to inspect the crawl4ai configuration options.
+    This is intended for debugging configuration issues.
+    """
+    try:
+        from inspect import signature, getmro
+        from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+        
+        # Inspect BrowserConfig
+        logger.info("Examining BrowserConfig class:")
+        browser_sig = signature(BrowserConfig.__init__)
+        logger.info(f"BrowserConfig constructor signature: {browser_sig}")
+        
+        # Inspect BrowserConfig hierarchy
+        browser_mro = getmro(BrowserConfig)
+        logger.info(f"BrowserConfig class hierarchy: {[cls.__name__ for cls in browser_mro]}")
+        
+        # Inspect CrawlerRunConfig
+        logger.info("Examining CrawlerRunConfig class:")
+        run_sig = signature(CrawlerRunConfig.__init__)
+        logger.info(f"CrawlerRunConfig constructor signature: {run_sig}")
+        
+        # Try creating simple instances
+        logger.info("Attempting to create test instances:")
+        browser_config = BrowserConfig(headless=True)
+        logger.info(f"Successfully created BrowserConfig: {browser_config}")
+        
+        run_config = CrawlerRunConfig()
+        logger.info(f"Successfully created CrawlerRunConfig: {run_config}")
+        
+        # Report success
+        logger.info("Diagnostic complete - configuration classes appear accessible")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error during configuration diagnosis: {e}")
+        return False
+
+# Add hook to run diagnostic before main if needed
 if __name__ == "__main__":
     import sys
-    asyncio.run(main()) 
+    
+    # Check for diagnostic mode
+    if len(sys.argv) > 1 and sys.argv[1] == "--diagnose":
+        asyncio.run(diagnose_crawler_config())
+    else:
+        # Normal execution
+        asyncio.run(main()) 
