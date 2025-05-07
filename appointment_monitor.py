@@ -139,19 +139,19 @@ class AppointmentMonitor:
         Returns:
             bool: True if initialization was successful, False otherwise.
         """
-        try:
-            # Check if crawler already exists and is valid
-            if self.crawler is not None:
-                return True
+        # Check if crawler already exists and is valid
+        if self.crawler is not None:
+            return True
 
-            # Use a flag to prevent recursive calls
-            if self._initializing_crawler:
-                logger.warning("Avoiding recursive setup_crawler call")
-                return False
-                
-            # Set flag to indicate we're initializing
-            self._initializing_crawler = True
-            
+        # Use a flag to prevent recursive calls
+        if self._initializing_crawler:
+            logger.warning("Avoiding recursive setup_crawler call")
+            return False
+        
+        # Set flag to indicate we're initializing
+        self._initializing_crawler = True
+        
+        try:
             # Force garbage collection before starting new crawler
             try:
                 import gc
@@ -160,16 +160,16 @@ class AppointmentMonitor:
                 logger.warning(f"Error during pre-initialization garbage collection: {gc_error}")
             
             # Create a new crawler instance with explicit timeout
+            logger.info("Initializing crawler with memory optimization")
+            
             try:
-                # Log the browser configuration we're using
-                logger.info("Initializing crawler with memory optimization")
-                
+                # Use a simple approach to create the crawler with timeout
                 self.crawler = await asyncio.wait_for(
                     AsyncWebCrawler(config=self.browser_config).__aenter__(),
                     timeout=30  # 30 second timeout for initialization
                 )
                 
-                # Verify the crawler has necessary methods and is properly initialized
+                # Verify the crawler has necessary methods
                 if not hasattr(self.crawler, 'arun'):
                     logger.error("Crawler is missing required 'arun' method")
                     self.crawler = None
@@ -177,27 +177,33 @@ class AppointmentMonitor:
                     return False
                     
                 logger.info("Successfully initialized crawler with memory optimization")
+                return True
                 
             except asyncio.TimeoutError:
                 logger.error("Timeout while initializing crawler")
-                self._initializing_crawler = False
                 self.crawler = None
                 return False
-            
-            # Reset the initialization flag
-            self._initializing_crawler = False
-            
-            return True
+            except Exception as e:
+                logger.error(f"Error in crawler initialization: {e}")
+                self.crawler = None
+                return False
+        
         except Exception as e:
             logger.error(f"Error initializing crawler: {e}")
-            # Ensure crawler is set to None on failure
             self.crawler = None
-            # Reset the initialization flag
-            self._initializing_crawler = False
             return False
+        finally:
+            # Always reset the initialization flag when exiting this method
+            self._initializing_crawler = False
 
     async def cleanup_crawler(self):
         """Clean up the crawler instance with aggressive memory cleanup."""
+        # If we're already initializing, we shouldn't be cleaning up
+        # This prevents recursion between setup and cleanup
+        if self._initializing_crawler:
+            logger.warning("Avoiding crawler cleanup during initialization")
+            return
+        
         if self.crawler is not None:
             try:
                 # Attempt normal cleanup
@@ -218,9 +224,11 @@ class AppointmentMonitor:
                 except Exception as gc_error:
                     logger.error(f"Error during forced garbage collection: {gc_error}")
                 
-                # Reset crawler reference
+                # Always reset crawler reference
                 self.crawler = None
-                self._initializing_crawler = False
+            
+        # Always ensure initialization flag is reset
+        self._initializing_crawler = False
 
     async def cleanup(self):
         """Clean up all resources used by the monitor."""
@@ -260,8 +268,13 @@ class AppointmentMonitor:
                 if not crawler_valid:
                     logger.warning(f"Crawler not initialized when processing {city}, initializing new instance...")
                     
-                    # Reset initialization flag to avoid recursion
-                    self._initializing_crawler = False
+                    # Make sure initialization flag is clear before trying
+                    if self._initializing_crawler:
+                        logger.error(f"Cannot initialize crawler while another initialization is in progress for {city}")
+                        data["error"] = "Crawler initialization already in progress"
+                        return data
+                        
+                    # Try to initialize the crawler
                     crawler_valid = await self.setup_crawler()
                 
                 if not crawler_valid:
@@ -310,16 +323,15 @@ class AppointmentMonitor:
                             logger.info(f"Attempting to create fresh crawler for {city}, retry {retry_count}/{max_retries}")
                             await asyncio.sleep(1)  # Brief pause before retry
                             
-                            # Reset initialization flag to avoid recursion
-                            self._initializing_crawler = False
-                            crawler_valid = await self.setup_crawler()
-                            
-                            if crawler_valid:
-                                logger.info(f"Successfully initialized new crawler for retry {retry_count}")
+                            # Only retry if we're not currently initializing
+                            if not self._initializing_crawler:
+                                # Try to initialize a new crawler - note we don't check the return value here
+                                # to avoid circular logic. We'll check crawler validity in the next loop iteration.
+                                await self.setup_crawler()
                                 continue
                             else:
-                                logger.error(f"Failed to initialize crawler for retry {retry_count}")
-                                data["error"] = f"Failed to initialize crawler after NoneType error"
+                                logger.error(f"Cannot initialize crawler while another initialization is in progress - retry {retry_count}")
+                                data["error"] = "Initialization already in progress during retry"
                                 return data
                         else:
                             logger.error(f"Exceeded retry limit after NoneType error for {city}")
@@ -340,13 +352,15 @@ class AppointmentMonitor:
                         # Completely clean up and create a new crawler instance
                         await self.cleanup_crawler()
                         
-                        # Reset initialization flag to avoid recursion
-                        self._initializing_crawler = False
-                        if await self.setup_crawler():
-                            logger.info(f"Successfully created new crawler for retry {retry_count}")
+                        # Only retry if we're not currently initializing
+                        if not self._initializing_crawler:
+                            # Try to initialize but don't recursively check results
+                            await self.setup_crawler()
                             continue
                         else:
-                            logger.error(f"Failed to create new crawler for retry {retry_count}")
+                            logger.error(f"Cannot initialize crawler while another initialization is in progress - retry {retry_count}")
+                            data["error"] = "Initialization already in progress during retry"
+                            return data
                     
                     # We've exceeded retries or failed to create a new crawler
                     data["error"] = f"Crawler error: {str(arun_error)}"
@@ -733,8 +747,16 @@ class AppointmentMonitor:
                 # Create a fresh crawler for each batch
                 await self.cleanup_crawler()
                 
-                # Reset initialization flag
+                # Make sure initialization flag is clear
                 self._initializing_crawler = False
+                
+                # Try to initialize the crawler with protection against recursive calls
+                if self._initializing_crawler:
+                    logger.error(f"Cannot initialize crawler for batch {i//batch_size + 1} - another initialization is in progress")
+                    await asyncio.sleep(5)
+                    continue
+                    
+                # Initialize crawler for this batch
                 crawler_initialized = await self.setup_crawler()
                 
                 if not crawler_initialized:
@@ -752,8 +774,18 @@ class AppointmentMonitor:
                         if self.crawler is None:
                             logger.warning("Crawler became invalid, attempting to reinitialize...")
                             
-                            # Reset the initialization flag before trying again
-                            self._initializing_crawler = False
+                            # Check if initialization is already in progress
+                            if self._initializing_crawler:
+                                logger.error(f"Cannot reinitialize crawler - another initialization is in progress")
+                                error_data = {
+                                    "city": city, 
+                                    "error": "Crawler initialization already in progress", 
+                                    "timestamp": datetime.now().isoformat()
+                                }
+                                await self.db.save_appointment_data(city, error_data)
+                                continue
+                                
+                            # Try to initialize a new crawler
                             crawler_initialized = await self.setup_crawler()
                             
                             if not crawler_initialized:
@@ -765,7 +797,7 @@ class AppointmentMonitor:
                                 }
                                 await self.db.save_appointment_data(city, error_data)
                                 continue
-                                
+                            
                         # Extract current appointment data
                         current_data = await self.extract_appointment_data(city)
                         
@@ -824,6 +856,50 @@ async def run_scheduler():
         schedule.run_pending()
         await asyncio.sleep(1)
 
+async def recover_from_recursion_error(monitor=None):
+    """Attempt to recover from a recursion error by aggressively cleaning up resources.
+    
+    Args:
+        monitor: Optional AppointmentMonitor instance to clean up
+        
+    Returns:
+        bool: True if recovery was successful, False otherwise
+    """
+    logger.warning("Attempting to recover from recursion error...")
+    
+    try:
+        # 1. Force garbage collection
+        import gc
+        gc.collect()
+        
+        # 2. If we have a monitor instance, reset it completely
+        if monitor:
+            try:
+                # Force reset crawler flags
+                monitor.crawler = None
+                monitor._initializing_crawler = False
+                
+                # Attempt to clean up any resources
+                try:
+                    await monitor.cleanup()
+                except Exception as e:
+                    logger.error(f"Error during monitor cleanup in recovery: {e}")
+            except Exception as e:
+                logger.error(f"Error resetting monitor in recovery: {e}")
+                
+        # 3. Additional step - sleep briefly to allow any pending async tasks to resolve
+        await asyncio.sleep(2)
+        
+        # Force another garbage collection
+        gc.collect()
+        
+        logger.info("Recovery steps completed, system should be in a clean state")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to recover from recursion error: {e}")
+        return False
+
 async def main():
     """Main function to start the monitoring process."""
     max_restarts = 3
@@ -856,6 +932,24 @@ async def main():
         except KeyboardInterrupt:
             logger.info("Received shutdown signal. Cleaning up...")
             break
+            
+        except RecursionError as rec_err:
+            logger.critical(f"Recursion error detected: {rec_err}")
+            logger.critical("This is likely due to circular function calls in the crawler initialization.")
+            
+            # Attempt recovery
+            recovery_successful = await recover_from_recursion_error(monitor)
+            
+            # Handle restart based on recovery success
+            restart_count += 1
+            if restart_count <= max_restarts:
+                # Use a longer wait time for recursion errors
+                recursion_wait_time = restart_wait_time * 2
+                logger.warning(f"Waiting {recursion_wait_time} seconds before restart after recursion error...")
+                await asyncio.sleep(recursion_wait_time)
+            else:
+                logger.critical("Exceeded maximum restarts after recursion errors. Service will terminate.")
+                break
             
         except Exception as e:
             logger.error(f"Unexpected error in main function: {e}")
