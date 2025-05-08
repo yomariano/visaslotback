@@ -67,16 +67,27 @@ class AppointmentMonitor:
             "--js-flags=--max_old_space_size=256" # Limit JS memory heap size
         ]
         
-        # Initialize browser config - only use the params we know are supported
-        self.browser_config = BrowserConfig(
-            headless=True,
-            verbose=True
-        )
+        # Initialize browser config - inspect signature first and apply args if supported
+        browser_config_kwargs = {"headless": True, "verbose": True}
+        try:
+            from inspect import signature # Import here, will be in scope for the next try block too
+            browser_sig = signature(BrowserConfig.__init__)
+            if "browser_args" in browser_sig.parameters:
+                browser_config_kwargs["browser_args"] = self.browser_optimization_args
+                logger.info("BrowserConfig supports 'browser_args'. Applying memory optimization arguments directly to BrowserConfig.")
+            else:
+                logger.warning("BrowserConfig does not appear to support 'browser_args' parameter directly. "
+                               "Memory optimizations might not be applied at the earliest stage of browser initialization.")
+        except Exception as sig_err:
+            logger.error(f"Error inspecting BrowserConfig signature: {sig_err}. "
+                         "Proceeding with default BrowserConfig parameters without attempting to add browser_args.")
+        
+        self.browser_config = BrowserConfig(**browser_config_kwargs)
         
         # Initialize crawler config
         # Check if browser_args is supported in the signature
         try:
-            from inspect import signature
+            # 'signature' is in scope from the import in the try block above
             run_sig = signature(CrawlerRunConfig.__init__)
             browser_args_supported = "browser_args" in run_sig.parameters
             
@@ -1176,4 +1187,4 @@ if __name__ == "__main__":
         asyncio.run(diagnose_crawler_config())
     else:
         # Normal execution
-        asyncio.run(main()) 
+        asyncio.run(main())
