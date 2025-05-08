@@ -21,7 +21,7 @@ while [ $RESTART_COUNT -le $MAX_RESTARTS ]; do
     log "Starting appointment_monitor.py (attempt $((RESTART_COUNT+1))/$((MAX_RESTARTS+1)))"
     
     # Start the appointment monitor process
-    python3 appointment_monitor.py --diagnose
+    python3 appointment_monitor.py
 
     
     # Get the exit code
