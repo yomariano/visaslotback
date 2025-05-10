@@ -150,7 +150,7 @@ class AppointmentMonitor:
         Returns:
             bool: True if initialization was successful, False otherwise.
         """
-        # Check if crawler already exists and is valid
+        # If a crawler already exists, consider it valid
         if self.crawler is not None:
             return True
 
@@ -170,33 +170,25 @@ class AppointmentMonitor:
             except Exception as gc_error:
                 logger.warning(f"Error during pre-initialization garbage collection: {gc_error}")
             
-            # Create a new crawler instance with explicit timeout
             logger.info("Initializing crawler with memory optimization")
             
             try:
                 # Create browser configuration
                 browser_config = self.browser_config
                 
-                # Create the crawler directly without using __aenter__ in a way that could cause recursion
+                # Create the crawler directly
                 crawler = AsyncWebCrawler(config=browser_config)
                 
-                # Manually initialize the crawler with timeout
-                # This avoids the potential recursion in __aenter__
+                # Assign crawler first so cleanup can work if needed
+                self.crawler = crawler
+                
+                # Use a direct timeout approach for browser initialization
                 try:
-                    self.crawler = crawler
-                    # Use a direct timeout approach for browser initialization
                     await asyncio.wait_for(
                         self._initialize_browser(crawler),
                         timeout=30  # 30 second timeout for initialization
                     )
                     
-                    # Verify the crawler has necessary methods
-                    if not hasattr(self.crawler, 'arun'):
-                        logger.error("Crawler is missing required 'arun' method")
-                        self.crawler = None
-                        self._initializing_crawler = False
-                        return False
-                        
                     logger.info("Successfully initialized crawler with memory optimization")
                     return True
                 except asyncio.TimeoutError:
@@ -204,19 +196,11 @@ class AppointmentMonitor:
                     self.crawler = None
                     return False
                 
-            except asyncio.TimeoutError:
-                logger.error("Timeout while initializing crawler")
-                self.crawler = None
-                return False
             except Exception as e:
                 logger.error(f"Error in crawler initialization: {e}")
                 self.crawler = None
                 return False
         
-        except Exception as e:
-            logger.error(f"Error initializing crawler: {e}")
-            self.crawler = None
-            return False
         finally:
             # Always reset the initialization flag when exiting this method
             self._initializing_crawler = False
@@ -227,17 +211,25 @@ class AppointmentMonitor:
         This is separated to avoid recursion issues with __aenter__.
         """
         try:
-            # If the crawler has a browser initialization method, use it
+            # Try the most direct browser initialization method first
             if hasattr(crawler, 'init_browser'):
                 await crawler.init_browser()
-            # Or if it has a browser property that needs to be initialized
-            elif hasattr(crawler, 'browser') and crawler.browser is None and hasattr(crawler, '_setup_browser'):
-                await crawler._setup_browser()
-            # Fallback to trying __aenter__ if no other methods are available
-            else:
-                await crawler.__aenter__()
+                return True
             
-            return True
+            # If that's not available, try setting up the browser directly
+            elif hasattr(crawler, '_setup_browser'):
+                await crawler._setup_browser()
+                return True
+            
+            # Last resort - try the async enter method, which might be more complex
+            elif hasattr(crawler, '__aenter__'):
+                await crawler.__aenter__()
+                return True
+            
+            else:
+                logger.error("Crawler has no known browser initialization method")
+                return False
+            
         except Exception as e:
             logger.error(f"Error in browser initialization: {e}")
             raise
@@ -250,6 +242,7 @@ class AppointmentMonitor:
             logger.warning("Avoiding crawler cleanup during initialization")
             return
         
+        # Only attempt cleanup if we have a crawler instance
         if self.crawler is not None:
             try:
                 # Attempt normal cleanup
@@ -262,17 +255,17 @@ class AppointmentMonitor:
                         await self.crawler.browser.close()
                 except Exception as be:
                     logger.error(f"Error closing browser directly: {be}")
-            finally:
-                # Force garbage collection after browser cleanup
-                try:
-                    import gc
-                    gc.collect()
-                except Exception as gc_error:
-                    logger.error(f"Error during forced garbage collection: {gc_error}")
-                
-                # Always reset crawler reference
-                self.crawler = None
-            
+        
+        # Force garbage collection after browser cleanup - even if no crawler
+        try:
+            import gc
+            gc.collect()
+        except Exception as gc_error:
+            logger.error(f"Error during forced garbage collection: {gc_error}")
+        
+        # Always reset crawler reference regardless of cleanup success
+        self.crawler = None
+        
         # Always ensure initialization flag is reset
         self._initializing_crawler = False
 
@@ -301,114 +294,39 @@ class AppointmentMonitor:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Define a maximum retry count
-        max_retries = 2  # Increased from 1 to 2 for better resilience
+        # Define a maximum retry count for network/crawling errors
+        max_retries = 2
         retry_count = 0
         
         while retry_count <= max_retries:
             try:
                 city_url = self.get_city_url(city)
                 
-                # Always verify crawler is initialized immediately before use
-                crawler_valid = self.crawler is not None
-                if not crawler_valid:
-                    logger.warning(f"Crawler not initialized when processing {city}, initializing new instance...")
-                    
-                    # Make sure initialization flag is clear before trying
-                    if self._initializing_crawler:
-                        logger.error(f"Cannot initialize crawler while another initialization is in progress for {city}")
-                        data["error"] = "Crawler initialization already in progress"
-                        return data
-                        
-                    # Try to initialize the crawler
-                    crawler_valid = await self.setup_crawler()
-                
-                if not crawler_valid:
-                    # If we still don't have a valid crawler after setup attempt, report error
-                    data["error"] = "Failed to initialize crawler after attempt"
-                    return data
-                
-                # Double-check crawler is not None before proceeding
+                # Check if crawler is available - do NOT attempt to initialize
                 if self.crawler is None:
-                    # This is a critical error - we should NEVER reach here if crawler_valid was True
-                    logger.error(f"Crawler unexpectedly None despite initialization for {city}")
-                    data["error"] = "Crawler unexpectedly became None"
-                    return data
-                
-                # Store a reference to the crawler to avoid race conditions
-                current_crawler = self.crawler
-                
-                # Verify the crawler reference is still valid before attempting to use it
-                if current_crawler is None:
-                    logger.error(f"Crawler reference became None before use for {city}")
-                    data["error"] = "Crawler reference became None before use"
+                    logger.error(f"Crawler is None when processing {city} - this should have been checked earlier")
+                    data["error"] = "Crawler not available"
                     return data
                 
                 # Use the crawler instance with proper error handling
                 try:
-                    # Final safety check immediately before calling arun
-                    if current_crawler is None:
-                        raise AttributeError("Crawler is None, cannot call arun")
-                    
                     # Ensure we're using the config with browser optimizations
-                    result = await current_crawler.arun(
+                    result = await self.crawler.arun(
                         url=city_url,
                         config=self.crawler_config
                     )
-                except AttributeError as attr_error:
-                    # Specific handling for NoneType errors
-                    if "NoneType" in str(attr_error) or "None" in str(attr_error):
-                        logger.critical(f"Crawler became None during operation for {city}: {attr_error}")
-                        # Force cleanup and retry with a fresh crawler
-                        self.crawler = None  # Ensure the reference is cleared
-                        await self.cleanup_crawler()  # This is safe even if crawler is None
-                        
-                        # Increment retry counter
-                        retry_count += 1
-                        if retry_count <= max_retries:
-                            logger.info(f"Attempting to create fresh crawler for {city}, retry {retry_count}/{max_retries}")
-                            await asyncio.sleep(1)  # Brief pause before retry
-                            
-                            # Only retry if we're not currently initializing
-                            if not self._initializing_crawler:
-                                # Try to initialize a new crawler - note we don't check the return value here
-                                # to avoid circular logic. We'll check crawler validity in the next loop iteration.
-                                await self.setup_crawler()
-                                continue
-                            else:
-                                logger.error(f"Cannot initialize crawler while another initialization is in progress - retry {retry_count}")
-                                data["error"] = "Initialization already in progress during retry"
-                                return data
-                        else:
-                            logger.error(f"Exceeded retry limit after NoneType error for {city}")
-                            data["error"] = f"Exceeded retry limit: {str(attr_error)}"
-                            return data
-                    else:
-                        # Other attribute errors
-                        raise
                 except Exception as arun_error:
+                    # Only retry for network/crawling errors, not for initialization issues
                     logger.error(f"Error during crawler.arun for {city}: {arun_error}")
                     
                     # Increment retry count
                     retry_count += 1
                     
-                    # If we haven't reached max retries, create a fresh crawler instance
                     if retry_count <= max_retries:
-                        logger.info(f"Creating new crawler instance and retrying (attempt {retry_count}/{max_retries})...")
-                        # Completely clean up and create a new crawler instance
-                        await self.cleanup_crawler()
-                        
-                        # Only retry if we're not currently initializing
-                        if not self._initializing_crawler:
-                            # Try to initialize but don't recursively check results
-                            await self.setup_crawler()
-                            continue
-                        else:
-                            logger.error(f"Cannot initialize crawler while another initialization is in progress - retry {retry_count}")
-                            data["error"] = "Initialization already in progress during retry"
-                            return data
+                        logger.info(f"Retrying crawl for {city} (attempt {retry_count}/{max_retries})...")
+                        await asyncio.sleep(1)  # Brief pause before retry
+                        continue
                     
-                    # We've exceeded retries or failed to create a new crawler
                     data["error"] = f"Crawler error: {str(arun_error)}"
                     return data
                 
@@ -434,6 +352,7 @@ class AppointmentMonitor:
                     
                     # Process the content and extract data
                     try:
+                        # Content processing logic - unchanged from original
                         lines = content.split('\n')
                         
                         # Define known countries and their flags
@@ -569,7 +488,6 @@ class AppointmentMonitor:
                         return data
                 else:
                     # When success is False, safely get error message
-                    # The 'error' attribute may not exist on all result objects
                     error_msg = "Unknown crawler error"
                     
                     # Try several possible error attribute locations
@@ -580,7 +498,6 @@ class AppointmentMonitor:
                     elif hasattr(result, 'message'):
                         error_msg = str(result.message)
                     
-                    # Log the full result object structure for debugging
                     logger.error(f"Failed to extract data for {city}: {error_msg}")
                     
                     data["error"] = error_msg
@@ -592,21 +509,13 @@ class AppointmentMonitor:
             except Exception as e:
                 logger.error(f"Error extracting appointment data for {city}: {e}")
                 
-                # Check if the error is related to NoneType
-                if "NoneType" in str(e) or "None object has no attribute" in str(e):
-                    logger.critical(f"NoneType error detected in main exception handler for {city}: {e}")
-                    # Force cleanup to ensure we don't have a lingering bad state
-                    self.crawler = None
-                    await self.cleanup_crawler()
-                
                 # Increment retry count
                 retry_count += 1
                 
                 # If we haven't reached max retries, retry
                 if retry_count <= max_retries:
                     logger.info(f"Retrying extraction for {city} (attempt {retry_count}/{max_retries})...")
-                    # Ensure crawler is cleaned up before next attempt
-                    await self.cleanup_crawler()
+                    await asyncio.sleep(1)  # Brief pause before retry
                     continue
                 
                 # We've exceeded retries, return error data
@@ -788,81 +697,50 @@ class AppointmentMonitor:
             # Process cities in batches
             for i in range(0, len(all_cities), batch_size):
                 batch = all_cities[i:i+batch_size]
-                logger.info(f"Processing batch {i//batch_size + 1} of {(len(all_cities) + batch_size - 1) // batch_size}")
+                batch_num = i//batch_size + 1
+                total_batches = (len(all_cities) + batch_size - 1) // batch_size
+                logger.info(f"Processing batch {batch_num} of {total_batches}")
                 
+                # CENTRALIZED CRAWLER MANAGEMENT: Ensure clean state at beginning of batch
+                self.crawler = None
+                self._initializing_crawler = False
+                
+                # Try to initialize crawler for this batch - ONCE per batch
                 try:
-                    # Create a fresh crawler for each batch
-                    await self.cleanup_crawler()
-                    
-                    # Make sure initialization flag is clear
-                    self._initializing_crawler = False
-                    
-                    # Try to initialize the crawler with protection against recursive calls
-                    if self._initializing_crawler:
-                        logger.error(f"Cannot initialize crawler for batch {i//batch_size + 1} - another initialization is in progress")
-                        await asyncio.sleep(5)
-                        continue
-                        
-                    # Initialize crawler for this batch
                     crawler_initialized = await self.setup_crawler()
                     
                     if not crawler_initialized:
-                        logger.error(f"Failed to initialize crawler for batch {i//batch_size + 1}, skipping batch")
+                        logger.error(f"Failed to initialize crawler for batch {batch_num}, skipping batch")
                         # Sleep briefly before attempting next batch
                         await asyncio.sleep(5)
                         continue
-                
+                    
                 except RecursionError as rec_err:
-                    # Handle recursion errors directly in the monitoring cycle
                     logger.critical(f"Recursion error during batch initialization: {rec_err}")
                     
                     # Try to recover using our custom recovery mechanism
                     recovery_successful = await recover_from_recursion_error(self)
                     
-                    if recovery_successful:
-                        logger.info(f"Successfully recovered from recursion error in batch {i//batch_size + 1}, continuing with next batch")
-                        # Skip current batch after a recursion error, even if recovery was successful
-                        await asyncio.sleep(5)
-                        continue
-                    else:
-                        logger.critical(f"Failed to recover from recursion error in batch {i//batch_size + 1}, skipping batch")
-                        await asyncio.sleep(10)  # Longer pause after failed recovery
-                        continue
+                    if not recovery_successful:
+                        logger.critical(f"Failed to recover from recursion error in batch {batch_num}, skipping batch")
+                    
+                    # Skip current batch after a recursion error, even if recovery was successful
+                    await asyncio.sleep(10)  # Longer pause after recursion error
+                    continue
                 
-                # Process each city in the batch
+                # Process each city in the batch using same crawler instance
+                batch_success = True
                 for country, city in batch:
                     logger.info(f"Checking appointments for {city}, {country}...")
                     
+                    # Safety check: if crawler became None, skip rest of batch
+                    if self.crawler is None:
+                        logger.error(f"Crawler became None unexpectedly during batch {batch_num}, skipping rest of batch.")
+                        batch_success = False
+                        break
+                    
                     try:
-                        # Verify crawler is still valid before proceeding
-                        if self.crawler is None:
-                            logger.warning("Crawler became invalid, attempting to reinitialize...")
-                            
-                            # Check if initialization is already in progress
-                            if self._initializing_crawler:
-                                logger.error(f"Cannot reinitialize crawler - another initialization is in progress")
-                                error_data = {
-                                    "city": city, 
-                                    "error": "Crawler initialization already in progress", 
-                                    "timestamp": datetime.now().isoformat()
-                                }
-                                await self.db.save_appointment_data(city, error_data)
-                                continue
-                                
-                            # Try to initialize a new crawler
-                            crawler_initialized = await self.setup_crawler()
-                            
-                            if not crawler_initialized:
-                                logger.error(f"Failed to reinitialize crawler, skipping {city}")
-                                error_data = {
-                                    "city": city, 
-                                    "error": "Failed to initialize crawler", 
-                                    "timestamp": datetime.now().isoformat()
-                                }
-                                await self.db.save_appointment_data(city, error_data)
-                                continue
-                            
-                        # Extract current appointment data
+                        # Extract current appointment data - crawler should already be initialized
                         current_data = await self.extract_appointment_data(city)
                         
                         if current_data:
@@ -876,7 +754,7 @@ class AppointmentMonitor:
                                 if changes:
                                     logger.info(f"Changes detected for {city}: {json.dumps(changes, cls=MongoJSONEncoder)}")
                                     await self.notify_users(city, changes)
-                            
+                        
                             all_results.append(current_data)
                     except RecursionError as rec_err:
                         logger.critical(f"Recursion error processing {city}: {rec_err}")
@@ -892,8 +770,10 @@ class AppointmentMonitor:
                         }
                         await self.db.save_appointment_data(city, error_data)
                         
-                        # Skip to next city after attempting recovery
-                        continue
+                        # Mark batch as failed and break out of city loop
+                        batch_success = False
+                        break
+                    
                     except Exception as city_error:
                         logger.error(f"Error processing {city}: {city_error}")
                         # Save minimal error data to keep history consistent
@@ -903,14 +783,18 @@ class AppointmentMonitor:
                     # Add a small delay between cities to avoid rate limiting
                     await asyncio.sleep(2)
                 
-                # Force garbage collection after each batch
-                logger.info(f"Completed batch {i//batch_size + 1}, performing cleanup")
+                # CENTRALIZED CRAWLER CLEANUP: Always clean up at end of batch
+                logger.info(f"Completed batch {batch_num}, performing cleanup for this batch.")
                 await self.cleanup_crawler()
+                
+                # Force garbage collection after each batch
                 import gc
                 gc.collect()
                 
-                # Sleep briefly between batches to let system resources recover
-                await asyncio.sleep(5)
+                # Sleep between batches to let system resources recover
+                # Use a longer sleep if the batch had problems
+                sleep_time = 10 if not batch_success else 5
+                await asyncio.sleep(sleep_time)
             
         except RecursionError as rec_err:
             logger.critical(f"Recursion error in main monitoring cycle: {rec_err}")
@@ -919,14 +803,8 @@ class AppointmentMonitor:
         except Exception as e:
             logger.error(f"Error in monitoring cycle: {e}")
         finally:
-            # Clean up the crawler after the monitoring cycle
-            if self.crawler is not None:
-                try:
-                    await self.cleanup_crawler()
-                except Exception as cleanup_error:
-                    logger.error(f"Error during crawler cleanup: {cleanup_error}")
-                    self.crawler = None
-                    self._initializing_crawler = False
+            # Ensure crawler is cleaned up after the monitoring cycle
+            await self.cleanup_crawler()
             
             # Reset monitoring flag and update timestamps
             self.monitoring_in_progress = False
