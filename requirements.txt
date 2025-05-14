@@ -1,15 +1,15 @@
-aiohttp==3.8.5
+aiohttp==3.9.3
 backoff==2.2.1
 browser-use==0.1.45
-google-generativeai==0.4.0
-langchain-openai==0.0.5
+langchain-openai==0.3.11
 loguru==0.7.0
 motor==3.3.2
-openai==1.12.0
+openai==1.68.2
 pymongo==4.5.0
 python-dotenv==1.0.1
 schedule==1.2.0
 twilio==8.11.0
+playwright
 
 # Note: Some packages are part of Python's standard library and don't need to be listed:
 # - os
