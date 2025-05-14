@@ -42,6 +42,18 @@ class MongoJSONEncoder(json.JSONEncoder):
 
 class AppointmentMonitor:
     def __init__(self):
+        # Ensure OPENAI_API_KEY is set to the OpenRouter key if using OpenRouter for OpenAI models
+        # This is a workaround for potential issues in libraries that might prioritize OPENAI_API_KEY
+        openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+        if openrouter_api_key:
+            os.environ["OPENAI_API_KEY"] = openrouter_api_key
+        else:
+            # Fallback or warning if OPENROUTER_API_KEY is not set, as it's crucial for the setup
+            logger.warning("OPENROUTER_API_KEY is not set. Agent initialization might fail.")
+            # Optionally, try to use existing OPENAI_API_KEY if OpenRouter key is missing
+            # if not os.getenv("OPENAI_API_KEY"):
+            #     logger.error("Neither OPENROUTER_API_KEY nor OPENAI_API_KEY are set.")
+
         self.base_url = "https://schengenappointments.com"
         self.cities_by_country = {
             "Canada": ["Edmonton", "Montreal", "Ottawa", "Toronto", "Vancouver"],
@@ -75,7 +87,7 @@ class AppointmentMonitor:
         
         # Initialize LLM
         self.llm = ChatOpenAI(
-            model="openai/gpt-4.1-nano",
+            model="openai/gpt-4o-mini",
             base_url="https://openrouter.ai/api/v1",
             api_key=os.getenv("OPENROUTER_API_KEY")
         )
