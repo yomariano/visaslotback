@@ -1,17 +1,19 @@
 #!/bin/bash
 
 # Check for required environment variables
-if [ -z "$GOOGLE_API_KEY" ]; then
-    echo "Error: GOOGLE_API_KEY environment variable is not set"
+if [ -z "$OPENAI_API_KEY" ]; then
+    echo "Error: OPENAI_API_KEY environment variable is not set"
     exit 1
 fi
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-# Install system dependencies for Chromium
-echo "Installing system dependencies..."
+# Install system dependencies for Chrome
+echo "Installing system dependencies for Chrome..."
 apt-get update && apt-get install -y \
+    wget \
+    gnupg \
     libglib2.0-0 \
     libnss3 \
     libnspr4 \
@@ -36,21 +38,24 @@ apt-get update && apt-get install -y \
     libatspi2.0-0 \
     libgtk-3-0
 
+# Download and install Google Chrome
+echo "Installing Google Chrome..."
+wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add -
+echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list
+apt-get update && apt-get install -y google-chrome-stable
+
 # Install Python dependencies
 echo "Installing Python dependencies..."
 pip install -r requirements.txt
 
-# Install Playwright if not already installed
-echo "Installing/Updating Playwright..."
-pip install playwright --upgrade
-
-# Install Playwright browser dependencies
-echo "Installing Playwright browser dependencies..."
-playwright install chromium
-
-# Make restart script executable
+# Make scripts executable
+chmod +x run_monitor.py
 chmod +x restart_monitor.sh
+
+# Set Chrome path in environment
+export CHROME_PATH=$(which google-chrome-stable)
+echo "Using Chrome at: $CHROME_PATH"
 
 # Start the application with auto-restart capability
 echo "Starting appointment monitor with auto-restart capability..."
-exec ./restart_monitor.sh 
+exec ./run_monitor.py 

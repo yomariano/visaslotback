@@ -1,18 +1,21 @@
 import os
-import time
+import sys
 import asyncio
 import json
-import aiohttp
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import re
 from bson import ObjectId
-
-import google.generativeai as genai
+import gc
 import schedule
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from dotenv import load_dotenv
 from loguru import logger
+
+# Import browser_use components
+from langchain_openai import ChatOpenAI
+from browser_use import Agent, Browser, BrowserConfig
+from browser_use.browser.context import BrowserContextConfig
 
 from notification_service import NotificationService, NotificationData
 from mongodb import MongoDBClient
@@ -49,78 +52,9 @@ class AppointmentMonitor:
             "Miami", "New York", "San Francisco", "Seattle", "Washington DC"]
         }
         
-        # Define memory optimization arguments for Chrome
-        self.browser_optimization_args = [
-            "--disable-dev-shm-usage",  # Overcome limited /dev/shm in containers
-            "--disable-gpu",            # Disable GPU hardware acceleration
-            "--disable-extensions",     # Disable extensions to reduce memory
-            "--no-sandbox",             # Required for some environments
-            "--disable-setuid-sandbox", # Additional sandbox disabling
-            "--no-zygote",              # Don't fork zygote processes
-            "--disable-infobars",       # Don't show infobars
-            "--disable-features=TranslateUI,BlinkGenPropertyTrees",
-            "--disable-translate",      # Disable translate
-            "--blink-settings=imagesEnabled=false", # Disable images for memory saving
-            "--disable-dev-tools",      # Disable dev tools
-            "--mute-audio",             # Mute audio
-            "--memory-pressure-off",    # Turn off memory pressure signal
-            "--js-flags=--max_old_space_size=256" # Limit JS memory heap size
-        ]
-        
-        # Initialize browser config - inspect signature first and apply args if supported
-        browser_config_kwargs = {"headless": True, "verbose": True}
-        try:
-            from inspect import signature # Import here, will be in scope for the next try block too
-            browser_sig = signature(BrowserConfig.__init__)
-            if "browser_args" in browser_sig.parameters:
-                browser_config_kwargs["browser_args"] = self.browser_optimization_args
-                logger.info("BrowserConfig supports 'browser_args'. Applying memory optimization arguments directly to BrowserConfig.")
-            else:
-                logger.warning("BrowserConfig does not appear to support 'browser_args' parameter directly. "
-                               "Memory optimizations might not be applied at the earliest stage of browser initialization.")
-        except Exception as sig_err:
-            logger.error(f"Error inspecting BrowserConfig signature: {sig_err}. "
-                         "Proceeding with default BrowserConfig parameters without attempting to add browser_args.")
-        
-        self.browser_config = BrowserConfig(**browser_config_kwargs)
-        
-        # Initialize crawler config
-        # Check if browser_args is supported in the signature
-        try:
-            # 'signature' is in scope from the import in the try block above
-            run_sig = signature(CrawlerRunConfig.__init__)
-            browser_args_supported = "browser_args" in run_sig.parameters
-            
-            # Create configuration with or without browser_args
-            if browser_args_supported:
-                self.crawler_config = CrawlerRunConfig(
-                    cache_mode=CacheMode.BYPASS,
-                    js_code=["await new Promise(r => setTimeout(r, 2000));"],
-                    browser_args=self.browser_optimization_args
-                )
-                logger.info("Created crawler config with browser_args parameter")
-            else:
-                self.crawler_config = CrawlerRunConfig(
-                    cache_mode=CacheMode.BYPASS,
-                    js_code=["await new Promise(r => setTimeout(r, 2000));"]
-                )
-                # Try to set browser_args as an attribute if the parameter isn't supported
-                # but the attribute might be
-                try:
-                    self.crawler_config.browser_args = self.browser_optimization_args
-                    logger.info("Set browser_args as attribute on crawler config")
-                except Exception as attr_err:
-                    logger.warning(f"Could not set browser_args attribute: {attr_err}")
-                    logger.warning("Browser memory optimization will be limited")
-        
-        except Exception as config_err:
-            logger.error(f"Error determining CrawlerRunConfig parameters: {config_err}")
-            # Fallback to basic configuration
-            self.crawler_config = CrawlerRunConfig(
-                cache_mode=CacheMode.BYPASS,
-                js_code=["await new Promise(r => setTimeout(r, 2000));"]
-            )
-            logger.warning("Using fallback crawler configuration without memory optimizations")
+        # Initialize MongoDB client and notification service
+        self.db = MongoDBClient()
+        self.notification_service = NotificationService()
         
         # Get next three months for slot tracking
         current_month = datetime.now().month
@@ -131,161 +65,198 @@ class AppointmentMonitor:
                 month = 12
             self.tracked_months.append(datetime.strptime(str(month), "%m").strftime("%b").upper())
         
-        # Initialize crawler as None - will be set up when needed
-        self.crawler = None
-        self._initializing_crawler = False
-        
-        # Initialize MongoDB client and notification service
-        self.db = MongoDBClient()
-        self.notification_service = NotificationService()
-        
         # Add monitoring flag to prevent concurrent runs
         self.monitoring_in_progress = False
         self.last_monitoring_start = None
         self.last_monitoring_end = None
+        
+        # Set browser configuration
+        self._setup_browser_config()
+        
+        # Initialize LLM
+        self.llm = ChatOpenAI(
+            model="openai/gpt-4.1-nano",
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.getenv("OPENROUTER_API_KEY")
+        )
+        
+        # Initialize browser
+        self.browser = None
+        self.agent = None
 
-    async def setup_crawler(self) -> bool:
-        """Initialize the crawler if it hasn't been set up yet.
+    def _setup_browser_config(self):
+        """Configure browser settings for optimal performance."""
+        # Set path to Chrome executable (if not already set)
+        if "CHROME_PATH" not in os.environ:
+            # macOS path
+            if os.path.exists("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"):
+                os.environ["CHROME_PATH"] = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+            # Linux path
+            elif os.path.exists("/usr/bin/google-chrome"):
+                os.environ["CHROME_PATH"] = "/usr/bin/google-chrome"
+            # Windows path
+            elif os.path.exists("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"):
+                os.environ["CHROME_PATH"] = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
         
-        Returns:
-            bool: True if initialization was successful, False otherwise.
-        """
-        # If a crawler already exists, consider it valid
-        if self.crawler is not None:
-            return True
-
-        # Use a flag to prevent recursive calls
-        if self._initializing_crawler:
-            logger.warning("Avoiding recursive setup_crawler call")
-            return False
+        # Configure browser context
+        self.browser_context_config = BrowserContextConfig(
+            disable_security=False,
+            save_downloads_path=os.path.join(os.getcwd(), "downloads"),
+        )
         
-        # Set flag to indicate we're initializing
-        self._initializing_crawler = True
+    async def initialize_browser(self):
+        """Initialize browser instance."""
+        if self.browser is not None:
+            await self.cleanup_browser()
         
-        try:
-            # Force garbage collection before starting new crawler
+        # Create new browser instance
+        self.browser = Browser(
+            config=BrowserConfig(
+                headless=True,
+                disable_security=False,
+                new_context_config=self.browser_context_config,
+            )
+        )
+        
+        logger.info("Browser initialized successfully")
+        return True
+        
+    async def cleanup_browser(self):
+        """Clean up browser resources."""
+        if self.browser is not None:
             try:
-                import gc
-                gc.collect()
-            except Exception as gc_error:
-                logger.warning(f"Error during pre-initialization garbage collection: {gc_error}")
-            
-            logger.info("Initializing crawler with memory optimization")
-            
-            try:
-                # Create browser configuration
-                browser_config = self.browser_config
-                
-                # Create the crawler directly
-                crawler = AsyncWebCrawler(config=browser_config)
-                
-                # Assign crawler first so cleanup can work if needed
-                self.crawler = crawler
-                
-                # Use a direct timeout approach for browser initialization
-                try:
-                    await asyncio.wait_for(
-                        self._initialize_browser(crawler),
-                        timeout=30  # 30 second timeout for initialization
-                    )
-                    
-                    logger.info("Successfully initialized crawler with memory optimization")
-                    return True
-                except asyncio.TimeoutError:
-                    logger.error("Timeout while initializing crawler browser")
-                    self.crawler = None
-                    return False
-                
+                await self.browser.close()
             except Exception as e:
-                logger.error(f"Error in crawler initialization: {e}")
-                self.crawler = None
-                return False
-        
-        finally:
-            # Always reset the initialization flag when exiting this method
-            self._initializing_crawler = False
-    
-    async def _initialize_browser(self, crawler):
-        """Helper method to safely initialize the browser component of the crawler.
-        
-        This is separated to avoid recursion issues with __aenter__.
-        """
-        try:
-            # Try the most direct browser initialization method first
-            if hasattr(crawler, 'init_browser'):
-                await crawler.init_browser()
-                return True
-            
-            # If that's not available, try setting up the browser directly
-            elif hasattr(crawler, '_setup_browser'):
-                await crawler._setup_browser()
-                return True
-            
-            # Last resort - try the async enter method, which might be more complex
-            elif hasattr(crawler, '__aenter__'):
-                await crawler.__aenter__()
-                return True
-            
-            else:
-                logger.error("Crawler has no known browser initialization method")
-                return False
-            
-        except Exception as e:
-            logger.error(f"Error in browser initialization: {e}")
-            raise
-
-    async def cleanup_crawler(self):
-        """Clean up the crawler instance with aggressive memory cleanup."""
-        # If we're already initializing, we shouldn't be cleaning up
-        # This prevents recursion between setup and cleanup
-        if self._initializing_crawler:
-            logger.warning("Avoiding crawler cleanup during initialization")
-            return
-        
-        # Only attempt cleanup if we have a crawler instance
-        if self.crawler is not None:
-            try:
-                # Attempt normal cleanup
-                await self.crawler.__aexit__(None, None, None)
-            except Exception as e:
-                logger.error(f"Error during standard crawler cleanup: {e}")
-                try:
-                    # Try direct browser closing if available
-                    if hasattr(self.crawler, 'browser') and self.crawler.browser:
-                        await self.crawler.browser.close()
-                except Exception as be:
-                    logger.error(f"Error closing browser directly: {be}")
-        
-        # Force garbage collection after browser cleanup - even if no crawler
-        try:
-            import gc
-            gc.collect()
-        except Exception as gc_error:
-            logger.error(f"Error during forced garbage collection: {gc_error}")
-        
-        # Always reset crawler reference regardless of cleanup success
-        self.crawler = None
-        
-        # Always ensure initialization flag is reset
-        self._initializing_crawler = False
+                logger.error(f"Error closing browser: {e}")
+            finally:
+                self.browser = None
+                self.agent = None
+                
+        # Force garbage collection
+        gc.collect()
+        logger.info("Browser resources cleaned up")
 
     async def cleanup(self):
         """Clean up all resources used by the monitor."""
-        
-        # Close the crawler if it's open
-        await self.cleanup_crawler()
-        
-        # Close MongoDB connection
+        await self.cleanup_browser()
         await self.db.close()
+        logger.info("All resources cleaned up")
 
     def get_city_url(self, city: str) -> str:
         """Generate the URL for a specific city's tourism appointments."""
         city_formatted = city.lower().replace(" ", "-")
         url = f"{self.base_url}/in/{city_formatted}/tourism"
-        return url.replace("...", "")  # Remove any ellipsis that might have been added
+        return url
     
+    def _extract_json_from_text(self, text: str) -> Optional[str]:
+        """Extract JSON content from text, handling different formats."""
+        # Check for JSON block in markdown format
+        json_pattern = r"```(?:json)?\s*([\s\S]*?)\s*```"
+        matches = re.findall(json_pattern, text, re.MULTILINE)
+        
+        if matches:
+            # Validate each match to ensure it's valid JSON
+            for match in matches:
+                try:
+                    potential_json = match.strip()
+                    json.loads(potential_json)
+                    return potential_json
+                except json.JSONDecodeError:
+                    # Continue to next match if this one isn't valid
+                    continue
+        
+        # Look for JSON-like structure without markdown formatting
+        json_start = text.find('{')
+        json_end = text.rfind('}')
+        
+        if json_start >= 0 and json_end > json_start:
+            potential_json = text[json_start:json_end+1].strip()
+            try:
+                # Validate if it's actually JSON
+                json.loads(potential_json)
+                return potential_json
+            except json.JSONDecodeError:
+                # If not valid, try to clean or fix common issues
+                pass
+        
+        # If we couldn't find valid JSON, try to construct a minimal valid JSON structure
+        # from the extracted data about countries and availability
+        try:
+            # Extract country data using regex patterns
+            country_pattern = r"country(?:_name)?[\"']?\s*:\s*[\"']([^\"']+)[\"']"
+            countries = re.findall(country_pattern, text)
+            
+            if countries:
+                # Create a minimal valid JSON with extracted country names
+                minimal_json = {
+                    "countries": [{"country": country} for country in countries],
+                    "temporarily_unavailable": []
+                }
+                return json.dumps(minimal_json)
+        except Exception:
+            pass
+            
+        return None
+
+    def _process_country_data(self, city: str, countries_data_from_agent: List[Dict]) -> List[Dict]:
+        """
+        Processes country data from the agent to ensure it matches the desired format.
+        Assumes the agent provides 'country', 'flag', 'earliest_available', 'url', and 'slots' (as an object)
+        for each country, with uppercase month keys for slots.
+        """
+        processed_countries = []
+        if not isinstance(countries_data_from_agent, list):
+            logger.warning(f"[{city}] Expected a list for countries_data, got {type(countries_data_from_agent)}. Returning empty list.")
+            return []
+
+        for country_data in countries_data_from_agent:
+            if not isinstance(country_data, dict):
+                logger.warning(f"[{city}] Expected a dict for country_data item, got {type(country_data)}. Skipping item.")
+                continue
+
+            name = country_data.get("country")
+            flag = country_data.get("flag")
+            earliest_available = country_data.get("earliest_available")
+            url = country_data.get("url")
+            slots = country_data.get("slots")
+
+            if not name or not isinstance(name, str):
+                logger.warning(f"[{city}] Missing or invalid 'country' field in {country_data}. Skipping.")
+                continue
+
+            # Validate and format slots
+            formatted_slots = {}
+            if not isinstance(slots, dict):
+                logger.warning(f"[{city}] Missing or invalid 'slots' field for {name}, setting to empty for tracked months. Data: {slots}")
+                for month_key in self.tracked_months: # e.g., "MAY", "JUN", "JUL"
+                    formatted_slots[month_key] = None
+            else:
+                for month_key in self.tracked_months:
+                    slot_value = slots.get(month_key) 
+                    if slot_value is None and month_key not in slots: 
+                         formatted_slots[month_key] = None
+                    elif slot_value is not None and not isinstance(slot_value, str):
+                        formatted_slots[month_key] = str(slot_value)
+                    else:
+                        formatted_slots[month_key] = slot_value
+            
+            # Construct default URL if not provided or invalid
+            country_slug = name.lower().replace(' ', '-')
+            default_url = f"{self.get_city_url(city)}/{country_slug}"
+            current_country_url = url if isinstance(url, str) and url.startswith("http") else default_url
+
+            processed_countries.append({
+                "country": name,
+                "flag": flag if isinstance(flag, str) else "",
+                "earliest_available": earliest_available if isinstance(earliest_available, str) or earliest_available is None else str(earliest_available),
+                "url": current_country_url,
+                "slots": formatted_slots
+            })
+        
+        return processed_countries
+
     async def extract_appointment_data(self, city: str) -> Dict:
-        """Extract appointment data from the website for a specific city using Crawl4AI."""
+        """Extract appointment data from the website for a specific city using browser_use Agent."""
         # Initialize basic data object for consistent returns
         data = {
             "city": city,
@@ -294,237 +265,186 @@ class AppointmentMonitor:
             "timestamp": datetime.now().isoformat()
         }
         
-        # Define a maximum retry count for network/crawling errors
-        max_retries = 2
-        retry_count = 0
-        
-        while retry_count <= max_retries:
-            try:
-                city_url = self.get_city_url(city)
-                
-                # Check if crawler is available - do NOT attempt to initialize
-                if self.crawler is None:
-                    logger.error(f"Crawler is None when processing {city} - this should have been checked earlier")
-                    data["error"] = "Crawler not available"
-                    return data
-                
-                # Use the crawler instance with proper error handling
-                try:
-                    # Ensure we're using the config with browser optimizations
-                    result = await self.crawler.arun(
-                        url=city_url,
-                        config=self.crawler_config
-                    )
-                except Exception as arun_error:
-                    # Only retry for network/crawling errors, not for initialization issues
-                    logger.error(f"Error during crawler.arun for {city}: {arun_error}")
-                    
-                    # Increment retry count
-                    retry_count += 1
-                    
-                    if retry_count <= max_retries:
-                        logger.info(f"Retrying crawl for {city} (attempt {retry_count}/{max_retries})...")
-                        await asyncio.sleep(1)  # Brief pause before retry
-                        continue
-                    
-                    data["error"] = f"Crawler error: {str(arun_error)}"
-                    return data
-                
-                # Safe access to result attributes using getattr
-                success = getattr(result, 'success', None)
-                if success is None:
-                    logger.error(f"Invalid crawler result for {city}: missing 'success' attribute")
-                    data["error"] = "Invalid crawler result (missing success attribute)"
-                    return data
-                    
-                if success:
-                    # Check if result has markdown attribute, using safe getattr
-                    markdown = getattr(result, 'markdown', None)
-                    raw_markdown = getattr(markdown, 'raw_markdown', None) if markdown else None
-                    
-                    if raw_markdown is None:
-                        logger.error(f"Invalid crawler result for {city}: missing 'markdown.raw_markdown' attribute")
-                        data["error"] = "Invalid crawler result (missing markdown content)"
-                        return data
-                    
-                    content = raw_markdown
-                    logger.debug(f"Raw content for {city}:\n{content}")
-                    
-                    # Process the content and extract data
-                    try:
-                        # Content processing logic - unchanged from original
-                        lines = content.split('\n')
-                        
-                        # Define known countries and their flags
-                        country_indicators = {
-                            'Austria': '🇦🇹',
-                            'Lithuania': '🇱🇹',
-                            'Netherlands': '🇳🇱',
-                            'France': '🇫🇷',
-                            'Germany': '🇩🇪',
-                            'Italy': '🇮🇹',
-                            'Spain': '🇪🇸',
-                            'Switzerland': '🇨🇭',
-                            'Belgium': '🇧🇪',
-                            'Denmark': '🇩🇰',
-                            'Finland': '🇫🇮',
-                            'Greece': '🇬🇷',
-                            'Iceland': '🇮🇸',
-                            'Norway': '🇳🇴',
-                            'Portugal': '🇵🇹',
-                            'Sweden': '🇸🇪',
-                            'Estonia': '🇪🇪',
-                            'Hungary': '🇭🇺',
-                            'Latvia': '🇱🇻',
-                            'Malta': '🇲🇹',
-                            'Poland': '🇵🇱',
-                            'Slovenia': '🇸🇮',
-                            'Croatia': '🇭🇷',
-                            'Cyprus': '🇨🇾',
-                            'Luxembourg': '🇱🇺',
-                            'Czechia': '🇨🇿'
-                        }
-                        
-                        current_country = None
-                        current_country_data = None
-                        in_table_section = False
-                        in_unavailable_section = False
-                        
-                        for i, line in enumerate(lines):
-                            line = line.strip()
-                            if not line:
-                                continue
-                                
-                            # Detect table header line more specifically
-                            # Only check if we haven't found the table yet
-                            if not in_table_section and "DESTINATION" in line.upper() and "EARLIEST" in line.upper() and "|" in line:
-                                in_table_section = True
-                                continue # Skip processing the header line itself
-
-                            # Skip lines before the table section or the separator line
-                            if not in_table_section or line.startswith("---"):
-                                continue
-
-                            # Check for unavailable countries section marker
-                            if "Countries below have no available slots" in line:
-                                in_unavailable_section = True
-                                continue
-
-                            # Process unavailable countries
-                            if in_unavailable_section and "|" in line:
-                                columns = [col.strip() for col in line.split("|")]
-                                country_col = columns[0].strip()
-                                
-                                # Check if this is a country row with "No availability"
-                                if "No availability" in line:
-                                    for country, flag in country_indicators.items():
-                                        if country.lower() in country_col.lower() or flag in country_col:
-                                            if country not in data["temporarily_unavailable"]:
-                                                data["temporarily_unavailable"].append(country)
-                                                logger.info(f"Added {country} to temporarily unavailable list for {city}")
-                                            break
-                                continue
-
-                            # Parse country data from table rows for available slots
-                            if "|" in line and not in_unavailable_section:  # Data rows contain pipes
-                                columns = [col.strip() for col in line.split("|")]
-                                if len(columns) >= 5:  # Ensure we have all columns
-                                    # Extract country name and flag
-                                    country_col = columns[0]
-                                    for country, flag in country_indicators.items():
-                                        if country.lower() in country_col.lower() or flag in country_col:
-                                            current_country = country
-                                            current_country_data = {
-                                                "country": country,
-                                                "flag": flag,
-                                                "earliest_available": None,
-                                                "url": f"{city_url}/{country.lower()}",
-                                                "slots": {month: None for month in self.tracked_months}
-                                            }
-                                            
-                                            # Extract earliest available date
-                                            date_col = columns[1]
-                                            date_patterns = [
-                                                r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
-                                                r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}',
-                                                r'\d{1,2}(?:st|nd|rd|th)\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)',
-                                                r'\d{2}\s*(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)'  # Add pattern for "05 May" format
-                                            ]
-                                            for pattern in date_patterns:
-                                                match = re.search(pattern, date_col, re.IGNORECASE)
-                                                if match:
-                                                    current_country_data["earliest_available"] = match.group().strip()
-                                                    break
-                                            
-                                            # Extract slot information
-                                            for idx, month in enumerate(self.tracked_months, 2):
-                                                if idx < len(columns):
-                                                    slot_text = columns[idx].strip()
-                                                    
-                                                    # Check for slots pattern with more variations
-                                                    slots_match = re.search(r'(\d+)\s*[\+]?\s*slots?|(\d+)\s*\+', slot_text, re.IGNORECASE)
-                                                    if slots_match:
-                                                        matched_group = slots_match.group(1) or slots_match.group(2)
-                                                        slot_value = f"{matched_group}+"
-                                                        current_country_data["slots"][month] = slot_value
-                                                    # Check for notify pattern
-                                                    elif any(word in slot_text.lower() for word in ["notify", "notification", "alert"]):
-                                                        current_country_data["slots"][month] = "0"
-                                                    
-                                            # Add to countries list if we have either date or slots
-                                            if (current_country_data["earliest_available"] is not None or 
-                                                any(slots for slots in current_country_data["slots"].values() if slots is not None)):
-                                                data["countries"].append(current_country_data)
-                                                logger.info(f"Found available slots for {country} in {city}")
-                                            break
-                
-                        logger.info(f"Successfully extracted data from {city_url}")
-                        return data
-                    
-                    except Exception as parse_error:
-                        logger.error(f"Error parsing content for {city} at line {i if 'i' in locals() else 'unknown'}: {parse_error}")
-                        data["error"] = f"Parse error: {str(parse_error)}"
-                        # Don't retry parsing errors - they're not related to crawler issues
-                        return data
-                else:
-                    # When success is False, safely get error message
-                    error_msg = "Unknown crawler error"
-                    
-                    # Try several possible error attribute locations
-                    if hasattr(result, 'error'):
-                        error_msg = str(result.error)
-                    elif hasattr(result, 'error_message'):
-                        error_msg = str(result.error_message)
-                    elif hasattr(result, 'message'):
-                        error_msg = str(result.message)
-                    
-                    logger.error(f"Failed to extract data for {city}: {error_msg}")
-                    
-                    data["error"] = error_msg
-                    return data
-                    
-                # If we get here, we succeeded
-                break
-                    
-            except Exception as e:
-                logger.error(f"Error extracting appointment data for {city}: {e}")
-                
-                # Increment retry count
-                retry_count += 1
-                
-                # If we haven't reached max retries, retry
-                if retry_count <= max_retries:
-                    logger.info(f"Retrying extraction for {city} (attempt {retry_count}/{max_retries})...")
-                    await asyncio.sleep(1)  # Brief pause before retry
-                    continue
-                
-                # We've exceeded retries, return error data
-                data["error"] = str(e)
+        try:
+            city_url = self.get_city_url(city)
+            
+            if self.browser is None:
+                logger.error(f"Browser is None when processing {city}")
+                data["error"] = "Browser not available"
                 return data
+            
+            # Initialize agent with specific task for this city
+            agent_task = f"""
+            - Go to {city_url}
+            - Analyze the table of slots and extract the following information:
+              * For each country with available slots:
+                - Country name
+                - Flag emoji
+                - Earliest available date
+                - Number of slots for each month ({", ".join(self.tracked_months)})
+              * For countries with no availability, add them to a separate list
+            - Format the data as a detailed JSON structure with the following keys:
+              * countries: Array of objects with country, flag, earliest_available, and slots
+              * temporarily_unavailable: Array of country names with no slots
+            - For each country, make sure to store the country name and flag emoji separately:
+              * CORRECT: "country": "France", "flag": "🇫🇷"
+              * INCORRECT: "country": "France 🇫🇷"
+            - The output must be valid parseable JSON. Make sure all JSON strings and keys are properly quoted with double quotes.
+            - After extracting the data, validate that the JSON is properly formatted and complete before providing it.
+            """
+            
+            try:
+                self.agent = Agent(
+                    task=agent_task,
+                    llm=self.llm,
+                    browser=self.browser,
+                )
+                
+                # Add a fallback final_answer attribute to the agent to prevent errors
+                # This is a workaround for the browser_use library issue
+                if not hasattr(self.agent, 'final_answer'):
+                    self.agent.final_answer = None
+                
+                # Run the agent task with timeout
+                try:
+                    # Wrap the agent.run in a try-except to catch any AttributeError exceptions
+                    try:
+                        result = await asyncio.wait_for(
+                            self.agent.run(max_steps=50),
+                            timeout=120  # 2 minute timeout
+                        )
+                    except AttributeError as attr_error:
+                        # Handle the specific AttributeError case
+                        logger.error(f"AttributeError during agent execution for {city}: {attr_error}")
+                        if "final_answer" in str(attr_error):
+                            # This is the specific error we're trying to fix
+                            logger.info(f"Applying workaround for final_answer attribute error in {city}")
+                            # Provide a default result
+                            result = {"result": "{}"}
+                        else:
+                            # Re-raise other attribute errors
+                            raise
+                    
+                    # Extract the actual data from the agent's response
+                    logger.info(f"Agent task completed for {city}")
+                    
+                    # Process the agent's result to extract structured data
+                    try:
+                        # Debug the agent result
+                        logger.debug(f"Agent result for {city}: {result}")
+                        
+                        # Find the final result with is_done=True in all_results if available
+                        extracted_content = None
+                        
+                        # Check if result has all_results attribute
+                        if hasattr(result, 'all_results') and result.all_results:
+                            # First look for completed actions with JSON content
+                            for action_result in result.all_results:
+                                if hasattr(action_result, 'is_done') and action_result.is_done:
+                                    extracted_content = action_result.extracted_content
+                                    break
+                                
+                                # Also look for extracted content that might contain JSON
+                                if hasattr(action_result, 'extracted_content'):
+                                    content = action_result.extracted_content
+                                    if '```json' in content or '{' in content:
+                                        # Try to extract JSON from this content
+                                        json_content = self._extract_json_from_text(content)
+                                        if json_content:
+                                            try:
+                                                # Test if it's valid JSON
+                                                json.loads(json_content)
+                                                extracted_content = content
+                                                break
+                                            except json.JSONDecodeError:
+                                                # Continue if not valid
+                                                pass
+                        
+                        # If we found extracted content, try to use it
+                        if extracted_content:
+                            json_content = self._extract_json_from_text(extracted_content)
+                            if json_content:
+                                try:
+                                    extracted_data = json.loads(json_content)
+                                    
+                                    # Process the country data to ensure proper format
+                                    if "countries" in extracted_data:
+                                        # Process countries to separate country name and flag
+                                        processed_countries = self._process_country_data(city, extracted_data["countries"])
+                                        data["countries"] = processed_countries
+                                    
+                                    if "temporarily_unavailable" in extracted_data:
+                                        data["temporarily_unavailable"] = extracted_data["temporarily_unavailable"]
+                                    
+                                    logger.info(f"Successfully extracted data for {city} with {len(data['countries'])} countries available")
+                                    return data
+                                except json.JSONDecodeError as json_err:
+                                    logger.error(f"Error decoding JSON from extracted content for {city}: {json_err}")
+                                    # Continue with alternative extraction methods
+                        
+                        # Fallback to previous extraction method
+                        # Get the result from the agent's run
+                        # Avoid accessing potentially unsafe attributes
+                        agent_result = ""
+                        if hasattr(result, 'result'):
+                            agent_result = result.result
+                        elif isinstance(result, dict) and 'result' in result:
+                            agent_result = result['result']
+                        else:
+                            agent_result = str(result)
+                            
+                        logger.debug(f"Fallback agent result for {city}: {agent_result}")
+                        
+                        # Check if the answer contains JSON
+                        json_content = self._extract_json_from_text(agent_result)
+                        if json_content:
+                            try:
+                                # Parse the extracted JSON
+                                extracted_data = json.loads(json_content)
+                                
+                                # Process the country data to ensure proper format
+                                if "countries" in extracted_data:
+                                    # Process countries to separate country name and flag
+                                    processed_countries = self._process_country_data(city, extracted_data["countries"])
+                                    data["countries"] = processed_countries
+                                
+                                if "temporarily_unavailable" in extracted_data:
+                                    data["temporarily_unavailable"] = extracted_data["temporarily_unavailable"]
+                                
+                                logger.info(f"Successfully extracted data for {city} with {len(data['countries'])} countries available")
+                            except json.JSONDecodeError as json_err:
+                                logger.error(f"Error decoding JSON from agent result for {city}: {json_err}")
+                                data["error"] = f"JSON decode error: {str(json_err)}"
+                                data["raw_response"] = agent_result[:500]  # Store first 500 chars of response for debugging
+                        else:
+                            logger.warning(f"No valid JSON data found in agent's result for {city}")
+                            data["error"] = "Failed to parse agent result - no valid JSON found"
+                            data["raw_response"] = agent_result[:500]  # Store first 500 chars of response for debugging
+                    except Exception as parse_error:
+                        logger.error(f"Error parsing agent response for {city}: {parse_error}")
+                        data["error"] = f"Parse error: {str(parse_error)}"
+                        # Avoid accessing result properties directly in case of error
+                        if isinstance(result, str):
+                            data["raw_response"] = result[:500]
+                        else:
+                            data["raw_response"] = str(result)[:500]
+                    
+                except asyncio.TimeoutError:
+                    logger.error(f"Timeout extracting appointment data for {city}")
+                    data["error"] = "Extraction timeout"
+                except Exception as run_error:
+                    logger.error(f"Error running agent for {city}: {run_error}")
+                    data["error"] = f"Agent error: {str(run_error)}"
+            except Exception as agent_error:
+                logger.error(f"Error initializing agent for {city}: {agent_error}")
+                data["error"] = f"Agent initialization error: {str(agent_error)}"
+                
+        except Exception as e:
+            logger.error(f"Unexpected error extracting appointment data for {city}: {e}")
+            data["error"] = str(e)
         
-        # If we get here with no data populated, ensure we return the base data
         return data
-
+    
     async def detect_changes(self, city: str, current_data: Dict) -> Dict[str, Dict]:
         """
         Detect changes in appointment data for a city.
@@ -535,13 +455,16 @@ class AppointmentMonitor:
             # For new cities, treat all available slots as changes
             changes = {}
             for country_data in current_data.get("countries", []):
-                country = country_data["country"]
-                if any(slots and slots != "0" for slots in country_data["slots"].values()):
+                country = country_data.get("country", "")
+                if not country:
+                    continue
+                    
+                if any(slots and slots != "0" for slots in country_data.get("slots", {}).values()):
                     changes[country] = {
                         "type": "new_availability",
-                        "slots": country_data["slots"],
-                        "earliest_date": country_data["earliest_available"],
-                        "url": country_data["url"]
+                        "slots": country_data.get("slots", {}),
+                        "earliest_date": country_data.get("earliest_available"),
+                        "url": country_data.get("url", f"{self.get_city_url(city)}/{country.lower()}")
                     }
             return changes
         
@@ -549,28 +472,30 @@ class AppointmentMonitor:
         
         # Compare current and previous data
         for country_data in current_data.get("countries", []):
-            country = country_data["country"]
-            
+            country = country_data.get("country", "")
+            if not country:
+                continue
+                
             # Find previous data for this country
             previous_country_data = next(
-                (c for c in previous_data.get("countries", []) if c["country"] == country),
+                (c for c in previous_data.get("countries", []) if c.get("country", "") == country),
                 None
             )
             
             if not previous_country_data:
                 # New country with slots
-                if any(slots and slots != "0" for slots in country_data["slots"].values()):
+                if any(slots and slots != "0" for slots in country_data.get("slots", {}).values()):
                     changes[country] = {
                         "type": "new_country",
-                        "slots": country_data["slots"],
-                        "earliest_date": country_data["earliest_available"],
-                        "url": country_data["url"]
+                        "slots": country_data.get("slots", {}),
+                        "earliest_date": country_data.get("earliest_available"),
+                        "url": country_data.get("url", f"{self.get_city_url(city)}/{country.lower()}")
                     }
                 continue
             
             # Check for changes in slots
-            current_slots = country_data["slots"]
-            previous_slots = previous_country_data["slots"]
+            current_slots = country_data.get("slots", {})
+            previous_slots = previous_country_data.get("slots", {})
             
             for month, slots in current_slots.items():
                 # Convert slot values to integers for comparison
@@ -583,8 +508,8 @@ class AppointmentMonitor:
                         "month": month,
                         "previous_slots": previous_slots.get(month, "0"),
                         "new_slots": slots,
-                        "earliest_date": country_data["earliest_available"],
-                        "url": country_data["url"]
+                        "earliest_date": country_data.get("earliest_available"),
+                        "url": country_data.get("url", f"{self.get_city_url(city)}/{country.lower()}")
                     }
                     break
                 elif current_value > 0 and previous_value == 0:
@@ -592,8 +517,8 @@ class AppointmentMonitor:
                         "type": "new_slots",
                         "month": month,
                         "slots": slots,
-                        "earliest_date": country_data["earliest_available"],
-                        "url": country_data["url"]
+                        "earliest_date": country_data.get("earliest_available"),
+                        "url": country_data.get("url", f"{self.get_city_url(city)}/{country.lower()}")
                     }
                     break
         
@@ -608,7 +533,22 @@ class AppointmentMonitor:
         if not users:
             return
         
+        # Get the latest data to access flag information
+        current_data = await self.db.get_last_appointment_data(city)
+        if not current_data:
+            current_data = {"countries": []}
+        
         for country, change_data in changes.items():
+            # Find the flag for this country
+            flag_emoji = ""
+            for country_data in current_data.get("countries", []):
+                if country_data.get("country") == country and "flag" in country_data:
+                    flag_emoji = country_data["flag"]
+                    break
+            
+            # Add flag to change_data for use in notification message
+            change_data["flag_emoji"] = flag_emoji
+            
             notification_message = self._create_notification_message(city, country, change_data)
             notification_data = NotificationData(
                 city=city,
@@ -628,7 +568,12 @@ class AppointmentMonitor:
     
     def _create_notification_message(self, city: str, country: str, change_data: Dict) -> str:
         """Create a detailed notification message based on the change type."""
-        base_message = f"🔔 New visa appointment availability in {city} for {country}!\n\n"
+        # Get the flag emoji if available
+        flag_emoji = change_data.get("flag_emoji", "")
+                
+        # Include the flag in the message if available
+        country_display = f"{country} {flag_emoji}".strip()
+        base_message = f"🔔 New visa appointment availability in {city} for {country_display}!\n\n"
         
         if change_data["type"] == "new_availability":
             slots_info = ", ".join(f"{month}: {slots}" for month, slots in change_data["slots"].items() if slots and slots != "0")
@@ -654,7 +599,7 @@ class AppointmentMonitor:
         return message
 
     async def monitor_appointments(self):
-        """Main monitoring function that runs every minute."""
+        """Main monitoring function."""
         # Check if monitoring is already in progress
         if self.monitoring_in_progress:
             duration_since_start = None
@@ -664,8 +609,7 @@ class AppointmentMonitor:
                 if duration_since_start > 300:
                     logger.warning(f"Monitoring appears stuck for {duration_since_start:.1f} seconds. Force resetting flags.")
                     self.monitoring_in_progress = False
-                    # Force cleanup of any browser resources
-                    await self.cleanup_crawler()
+                    await self.cleanup_browser()
                     return
                 else:
                     logger.warning(
@@ -685,6 +629,13 @@ class AppointmentMonitor:
         all_results = []
         
         try:
+            # Initialize browser once for the entire monitoring cycle
+            browser_initialized = await self.initialize_browser()
+            if not browser_initialized:
+                logger.error("Failed to initialize browser, aborting monitoring cycle")
+                self.monitoring_in_progress = False
+                return
+            
             # Process cities in batches to manage memory usage
             batch_size = 5  # Process 5 cities at a time
             all_cities = []
@@ -701,46 +652,12 @@ class AppointmentMonitor:
                 total_batches = (len(all_cities) + batch_size - 1) // batch_size
                 logger.info(f"Processing batch {batch_num} of {total_batches}")
                 
-                # CENTRALIZED CRAWLER MANAGEMENT: Ensure clean state at beginning of batch
-                self.crawler = None
-                self._initializing_crawler = False
-                
-                # Try to initialize crawler for this batch - ONCE per batch
-                try:
-                    crawler_initialized = await self.setup_crawler()
-                    
-                    if not crawler_initialized:
-                        logger.error(f"Failed to initialize crawler for batch {batch_num}, skipping batch")
-                        # Sleep briefly before attempting next batch
-                        await asyncio.sleep(5)
-                        continue
-                    
-                except RecursionError as rec_err:
-                    logger.critical(f"Recursion error during batch initialization: {rec_err}")
-                    
-                    # Try to recover using our custom recovery mechanism
-                    recovery_successful = await recover_from_recursion_error(self)
-                    
-                    if not recovery_successful:
-                        logger.critical(f"Failed to recover from recursion error in batch {batch_num}, skipping batch")
-                    
-                    # Skip current batch after a recursion error, even if recovery was successful
-                    await asyncio.sleep(10)  # Longer pause after recursion error
-                    continue
-                
-                # Process each city in the batch using same crawler instance
-                batch_success = True
+                # Process each city in the batch
                 for country, city in batch:
                     logger.info(f"Checking appointments for {city}, {country}...")
                     
-                    # Safety check: if crawler became None, skip rest of batch
-                    if self.crawler is None:
-                        logger.error(f"Crawler became None unexpectedly during batch {batch_num}, skipping rest of batch.")
-                        batch_success = False
-                        break
-                    
                     try:
-                        # Extract current appointment data - crawler should already be initialized
+                        # Extract current appointment data
                         current_data = await self.extract_appointment_data(city)
                         
                         if current_data:
@@ -756,24 +673,6 @@ class AppointmentMonitor:
                                     await self.notify_users(city, changes)
                         
                             all_results.append(current_data)
-                    except RecursionError as rec_err:
-                        logger.critical(f"Recursion error processing {city}: {rec_err}")
-                        
-                        # Try to recover
-                        recovery_successful = await recover_from_recursion_error(self)
-                        
-                        # Save error data regardless of recovery success
-                        error_data = {
-                            "city": city, 
-                            "error": f"Recursion error: {str(rec_err)}", 
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        await self.db.save_appointment_data(city, error_data)
-                        
-                        # Mark batch as failed and break out of city loop
-                        batch_success = False
-                        break
-                    
                     except Exception as city_error:
                         logger.error(f"Error processing {city}: {city_error}")
                         # Save minimal error data to keep history consistent
@@ -783,28 +682,16 @@ class AppointmentMonitor:
                     # Add a small delay between cities to avoid rate limiting
                     await asyncio.sleep(2)
                 
-                # CENTRALIZED CRAWLER CLEANUP: Always clean up at end of batch
-                logger.info(f"Completed batch {batch_num}, performing cleanup for this batch.")
-                await self.cleanup_crawler()
-                
-                # Force garbage collection after each batch
-                import gc
-                gc.collect()
-                
-                # Sleep between batches to let system resources recover
-                # Use a longer sleep if the batch had problems
-                sleep_time = 10 if not batch_success else 5
-                await asyncio.sleep(sleep_time)
+                # Reinitialize browser between batches to prevent memory issues
+                await self.cleanup_browser()
+                await asyncio.sleep(5)  # Brief pause
+                await self.initialize_browser()
             
-        except RecursionError as rec_err:
-            logger.critical(f"Recursion error in main monitoring cycle: {rec_err}")
-            # Always attempt recovery for recursion errors
-            await recover_from_recursion_error(self)
         except Exception as e:
             logger.error(f"Error in monitoring cycle: {e}")
         finally:
-            # Ensure crawler is cleaned up after the monitoring cycle
-            await self.cleanup_crawler()
+            # Ensure browser is cleaned up after the monitoring cycle
+            await self.cleanup_browser()
             
             # Reset monitoring flag and update timestamps
             self.monitoring_in_progress = False
@@ -818,79 +705,20 @@ async def run_scheduler():
         schedule.run_pending()
         await asyncio.sleep(1)
 
-async def recover_from_recursion_error(monitor=None):
-    """Attempt to recover from a recursion error by aggressively cleaning up resources.
-    
-    Args:
-        monitor: Optional AppointmentMonitor instance to clean up
-        
-    Returns:
-        bool: True if recovery was successful, False otherwise
-    """
-    logger.warning("Attempting to recover from recursion error...")
-    
+async def force_cleanup():
+    """Force cleanup of system resources periodically"""
+    logger.info("Running scheduled forced memory cleanup")
     try:
-        # 1. Force garbage collection
-        import gc
-        import sys
+        # Force Python garbage collection
         gc.collect()
         
-        # 2. Check current recursion limit and temporarily increase it if needed
-        current_limit = sys.getrecursionlimit()
-        logger.info(f"Current recursion limit: {current_limit}")
+        # On Unix systems, try to free OS cache
+        if os.name == 'posix':
+            os.system('sync')  # Sync cached writes to persistent storage
         
-        try:
-            # Temporarily increase the recursion limit to help with recovery
-            if current_limit < 2000:
-                new_limit = min(current_limit * 2, 2000)  # Double but cap at 2000
-                logger.info(f"Temporarily increasing recursion limit to {new_limit}")
-                sys.setrecursionlimit(new_limit)
-        except Exception as limit_error:
-            logger.error(f"Error adjusting recursion limit: {limit_error}")
-        
-        # 3. If we have a monitor instance, aggressively reset it
-        if monitor:
-            try:
-                # Force reset crawler flags and references - most important step
-                monitor.crawler = None
-                monitor._initializing_crawler = False
-                
-                # Safety check - force reset all browser references 
-                if hasattr(monitor, 'browser') and monitor.browser:
-                    monitor.browser = None
-                
-                # Attempt to clean up any resources
-                try:
-                    # Use only cleanup_crawler, not the full cleanup to avoid potential recursion
-                    await monitor.cleanup_crawler()
-                except Exception as e:
-                    logger.error(f"Error during monitor cleanup in recovery: {e}")
-                    # Even if cleanup fails, ensure flags are reset
-                    monitor.crawler = None
-                    monitor._initializing_crawler = False
-            except Exception as e:
-                logger.error(f"Error resetting monitor in recovery: {e}")
-                
-        # 4. Sleep to allow any pending async tasks to resolve
-        await asyncio.sleep(5)  # Extended sleep time 
-        
-        # 5. Force another garbage collection cycle
-        gc.collect()
-        
-        # 6. Reset recursion limit to original value if we changed it
-        try:
-            if sys.getrecursionlimit() != current_limit:
-                logger.info(f"Resetting recursion limit to original value: {current_limit}")
-                sys.setrecursionlimit(current_limit)
-        except Exception as limit_reset_error:
-            logger.error(f"Error resetting recursion limit: {limit_reset_error}")
-        
-        logger.info("Recovery steps completed, system should be in a clean state")
-        return True
-        
+        logger.info("Completed forced memory cleanup")
     except Exception as e:
-        logger.error(f"Failed to recover from recursion error: {e}")
-        return False
+        logger.error(f"Error during forced cleanup: {e}")
 
 async def main():
     """Main function to start the monitoring process."""
@@ -898,22 +726,10 @@ async def main():
     restart_count = 0
     restart_wait_time = 60  # seconds to wait between restarts
     
-    # System-level protection - ensure a reasonable recursion limit
-    try:
-        import sys
-        current_limit = sys.getrecursionlimit()
-        # Set a higher recursion limit if the default is too low
-        if current_limit < 1500:
-            logger.info(f"Increasing default recursion limit from {current_limit} to 1500")
-            sys.setrecursionlimit(1500)
-    except Exception as limit_error:
-        logger.error(f"Error adjusting system recursion limit: {limit_error}")
-    
     while restart_count <= max_restarts:
         monitor = None
         try:
             # Force garbage collection before creating monitor instance
-            import gc
             gc.collect()
             
             # Create a new monitor instance
@@ -923,16 +739,11 @@ async def main():
             logger.info("Running initial test monitoring cycle...")
             try:
                 await monitor.monitor_appointments()
-            except RecursionError as rec_err:
-                logger.critical(f"Recursion error in initial monitoring cycle: {rec_err}")
-                # Attempt recovery before scheduling
-                recovery_successful = await recover_from_recursion_error(monitor)
-                if not recovery_successful:
-                    logger.critical("Failed to recover from recursion error in initial cycle")
-                    raise  # Re-raise to trigger restart
+            except Exception as initial_error:
+                logger.critical(f"Error in initial monitoring cycle: {initial_error}")
+                raise  # Re-raise to trigger restart
             
-            # Schedule regular monitoring at a reduced frequency to prevent resource buildup
-            # Changed from every 1 minute to every 5 minutes
+            # Schedule regular monitoring every 5 minutes
             schedule.every(5).minutes.do(lambda: asyncio.create_task(monitor.monitor_appointments()))
             
             # Add memory cleanup task every hour
@@ -947,38 +758,8 @@ async def main():
         except KeyboardInterrupt:
             logger.info("Received shutdown signal. Cleaning up...")
             break
-            
-        except RecursionError as rec_err:
-            logger.critical(f"Recursion error detected: {rec_err}")
-            logger.critical("This is likely due to circular function calls in the crawler initialization.")
-            
-            # Attempt recovery
-            recovery_successful = await recover_from_recursion_error(monitor)
-            
-            # Handle restart based on recovery success
-            restart_count += 1
-            if restart_count <= max_restarts:
-                # Use a longer wait time for recursion errors
-                recursion_wait_time = restart_wait_time * 2
-                logger.warning(f"Waiting {recursion_wait_time} seconds before restart after recursion error...")
-                await asyncio.sleep(recursion_wait_time)
-            else:
-                logger.critical("Exceeded maximum restarts after recursion errors. Service will terminate.")
-                break
-            
         except Exception as e:
             logger.error(f"Unexpected error in main function: {e}")
-            
-            # Check if the error is related to configuration
-            if "BrowserConfig" in str(e) or "CrawlerRunConfig" in str(e):
-                logger.critical(f"Critical configuration error detected: {e}")
-                logger.critical("This appears to be an issue with the crawl4ai library configuration.")
-                logger.critical("Please check the crawl4ai library documentation for correct configuration parameters.")
-                
-                # If this is a recurring configuration error, we should break to avoid constant restarts
-                if restart_count > 0:
-                    logger.critical("Multiple configuration errors detected. Stopping service.")
-                    break
             
             restart_count += 1
             
@@ -1001,68 +782,5 @@ async def main():
                 await monitor.cleanup()
                 logger.info("Appointment monitoring service stopped.")
 
-# Add new force cleanup function
-async def force_cleanup():
-    """Force cleanup of system resources periodically"""
-    logger.info("Running scheduled forced memory cleanup")
-    try:
-        # Force Python garbage collection
-        import gc
-        gc.collect()
-        
-        # On Unix systems, try to free OS cache
-        if os.name == 'posix':
-            os.system('sync')  # Sync cached writes to persistent storage
-        
-        logger.info("Completed forced memory cleanup")
-    except Exception as e:
-        logger.error(f"Error during forced cleanup: {e}")
-
-async def diagnose_crawler_config():
-    """Diagnostic function to inspect the crawl4ai configuration options.
-    This is intended for debugging configuration issues.
-    """
-    try:
-        from inspect import signature, getmro
-        from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-        
-        # Inspect BrowserConfig
-        logger.info("Examining BrowserConfig class:")
-        browser_sig = signature(BrowserConfig.__init__)
-        logger.info(f"BrowserConfig constructor signature: {browser_sig}")
-        
-        # Inspect BrowserConfig hierarchy
-        browser_mro = getmro(BrowserConfig)
-        logger.info(f"BrowserConfig class hierarchy: {[cls.__name__ for cls in browser_mro]}")
-        
-        # Inspect CrawlerRunConfig
-        logger.info("Examining CrawlerRunConfig class:")
-        run_sig = signature(CrawlerRunConfig.__init__)
-        logger.info(f"CrawlerRunConfig constructor signature: {run_sig}")
-        
-        # Try creating simple instances
-        logger.info("Attempting to create test instances:")
-        browser_config = BrowserConfig(headless=True)
-        logger.info(f"Successfully created BrowserConfig: {browser_config}")
-        
-        run_config = CrawlerRunConfig()
-        logger.info(f"Successfully created CrawlerRunConfig: {run_config}")
-        
-        # Report success
-        logger.info("Diagnostic complete - configuration classes appear accessible")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error during configuration diagnosis: {e}")
-        return False
-
-# Add hook to run diagnostic before main if needed
 if __name__ == "__main__":
-    import sys
-    
-    # Check for diagnostic mode
-    if len(sys.argv) > 1 and sys.argv[1] == "--diagnose":
-        asyncio.run(diagnose_crawler_config())
-    else:
-        # Normal execution
-        asyncio.run(main())
+    asyncio.run(main())

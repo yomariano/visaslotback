@@ -1,11 +1,13 @@
-crawl4ai>=0.6.0
-google-generativeai>=0.8.5
-python-dotenv>=1.0.0
-schedule>=1.2.0
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-loguru>=0.7.0
-motor>=3.3.2
-aiohttp>=3.9.0
-twilio>=8.12.0
-backoff>=2.2.1 
+aiohttp
+google-generativeai
+loguru
+pymongo
+twilio
+python-dotenv
+schedule
+# Install browser-use version that doesn't depend on langchain-google-genai
+browser-use
+openai
+langchain-openai
+# Remove crawl4ai, as we're no longer using it
+# crawl4ai

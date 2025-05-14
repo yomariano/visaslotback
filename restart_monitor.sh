@@ -18,11 +18,10 @@ log() {
 log "Starting appointment monitor restart script"
 
 while [ $RESTART_COUNT -le $MAX_RESTARTS ]; do
-    log "Starting appointment_monitor.py (attempt $((RESTART_COUNT+1))/$((MAX_RESTARTS+1)))"
+    log "Starting run_monitor.py (attempt $((RESTART_COUNT+1))/$((MAX_RESTARTS+1)))"
     
     # Start the appointment monitor process
-    python3 appointment_monitor.py
-
+    python3 run_monitor.py
     
     # Get the exit code
     EXIT_CODE=$?
@@ -38,6 +37,9 @@ while [ $RESTART_COUNT -le $MAX_RESTARTS ]; do
     
     if [ $RESTART_COUNT -le $MAX_RESTARTS ]; then
         log "Appointment monitor crashed with exit code $EXIT_CODE. Restarting in $RESTART_WAIT_TIME seconds..."
+        
+        # Force cleanup of any lingering browser processes
+        pkill -f "google-chrome" || true
         
         # Wait before restarting
         sleep $RESTART_WAIT_TIME

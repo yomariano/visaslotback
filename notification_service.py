@@ -14,7 +14,10 @@ load_dotenv(override=False)
 @dataclass
 class NotificationData:
     city: str
-    changes: Dict
+    country: str
+    message: str
+    change_type: str
+    url: str
     timestamp: datetime
 
 class NotificationService:
@@ -35,30 +38,16 @@ class NotificationService:
         if all([self.twilio_account_sid, self.twilio_auth_token]):
             self.twilio_client = Client(self.twilio_account_sid, self.twilio_auth_token)
 
-    def format_notification_message(self, data: NotificationData) -> str:
-        """Format the notification message for both email and SMS."""
-        message = f"Visa Slot Update for {data.city}\n\n"
-        
-        for country, details in data.changes.items():
-            message += f"{country}:\n"
-            if "new_slots" in details:
-                message += f"- New slots available: {details['new_slots']}\n"
-            if "earliest_date" in details:
-                message += f"- Earliest available date: {details['earliest_date']}\n"
-            message += "\n"
-        
-        return message
-
     async def send_email(self, to_email: str, data: NotificationData) -> bool:
         """Send email notification."""
         try:
             message = MIMEMultipart()
             message["From"] = self.smtp_username
             message["To"] = to_email
-            message["Subject"] = f"Visa Slot Update - {data.city}"
+            message["Subject"] = f"Visa Slot Update - {data.city} ({data.country})"
             
-            body = self.format_notification_message(data)
-            message.attach(MIMEText(body, "plain"))
+            # Use the pre-formatted message
+            message.attach(MIMEText(data.message, "plain"))
             
             with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
                 server.starttls()
@@ -77,9 +66,14 @@ class NotificationService:
             return False
         
         try:
-            message = self.format_notification_message(data)
+            # Use a shorter version of the message for SMS
+            sms_message = data.message
+            # Limit SMS length if needed
+            if len(sms_message) > 1000:
+                sms_message = sms_message[:997] + "..."
+                
             self.twilio_client.messages.create(
-                body=message,
+                body=sms_message,
                 from_=self.twilio_from_number,
                 to=to_phone
             )
@@ -90,7 +84,13 @@ class NotificationService:
 
     async def notify_user(self, email: str, phone: str, data: NotificationData) -> None:
         """Send notifications to a user through both email and SMS."""
-        email_sent = await self.send_email(email, data)
-        sms_sent = await self.send_sms(phone, data)
+        email_sent = False
+        sms_sent = False
+        
+        if email:
+            email_sent = await self.send_email(email, data)
+        
+        if phone:
+            sms_sent = await self.send_sms(phone, data)
         
         print(f"Notifications sent - Email: {email_sent}, SMS: {sms_sent}") 
