@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Check for required environment variables
-if [ -z "$OPENAI_API_KEY" ]; then
-    echo "Error: OPENAI_API_KEY environment variable is not set"
+if [ -z "$OPENROUTER_API_KEY" ]; then
+    echo "Error: OPENROUTER_API_KEY environment variable is not set"
     exit 1
 fi
 
