@@ -1,13 +1,9 @@
-aiohttp
-google-generativeai
-loguru
-pymongo
-twilio
-python-dotenv
-schedule
-# Install browser-use version that doesn't depend on langchain-google-genai
-browser-use
-openai
-langchain-openai
-# Remove crawl4ai, as we're no longer using it
-# crawl4ai
+aiohttp==3.8.5
+google-generativeai==0.4.0
+loguru==0.7.0
+pymongo==4.5.0
+twilio==8.11.0
+python-dotenv==1.0.1
+schedule==1.2.0
+# Install browser-use separately after installing the core dependencies
+# browser-use==0.1.45 
