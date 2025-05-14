@@ -5,7 +5,7 @@ This system monitors the Schengen appointment website for changes in appointment
 ## Features
 
 - Monitors schengenappointments.com for appointment availability changes
-- Uses Google Gemini AI to analyze changes in structured format
+- Uses Google Gemini AI and OpenAI via OpenRouter for data extraction
 - Sends webhook notifications with structured JSON data
 - Includes a sample webhook receiver for demonstration
 
@@ -19,13 +19,23 @@ First, copy the example environment file:
 cp env.example .env
 ```
 
-Edit the `.env` file and add your Google Gemini API key and configure the webhook URL:
+Edit the `.env` file and add your API keys and configure the webhook URL:
 
 ```
 GOOGLE_API_KEY=your_google_gemini_api_key_here
+OPENROUTER_API_KEY=your_openrouter_api_key_here
 WEBHOOK_URL=http://localhost:8000/webhook
 WEBHOOK_PORT=8000
 ```
+
+#### Obtaining API Keys
+
+- **OpenRouter API Key**: Visit [OpenRouter](https://openrouter.ai/) to create an account and generate an API key.
+  - OpenRouter provides a unified API to access OpenAI models and others
+  - The system uses OpenRouter to access GPT-4-nano for web data extraction
+
+- **Google Gemini API Key**: Visit [Google AI Studio](https://makersuite.google.com/app/apikey) to create an API key.
+  - Used as an alternative for certain extraction tasks
 
 ### 2. Install Dependencies
 
@@ -112,10 +122,17 @@ Change `1` to your desired interval in minutes.
 - Ensure `WEBHOOK_URL` is correctly set in your `.env` file
 - Check that your webhook receiver is running and accessible at the URL
 
-### Gemini API Issues
+### AI API Issues
 
 - Verify your `GOOGLE_API_KEY` is valid and has access to the Gemini API
+- Verify your `OPENROUTER_API_KEY` is valid and has sufficient credit 
+- Check if you see errors like `The api_key client option must be set` in logs, which indicates missing API keys
 - Check the logs for specific error messages
+
+### Browser Agent Failures
+
+- If the agent fails to extract data, check Chrome installation
+- Try running with a non-headless browser for debugging
 
 ## License
 
