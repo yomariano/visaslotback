@@ -87,7 +87,7 @@ class AppointmentMonitor:
         
         # Initialize LLM
         self.llm = ChatOpenAI(
-            model="openai/gpt-4o-mini",
+            model=os.getenv("OPENROUTER_MODEL_NAME", "google/gemma-3-27b-it:free"),
             base_url="https://openrouter.ai/api/v1",
             api_key=os.getenv("OPENROUTER_API_KEY")
         )
