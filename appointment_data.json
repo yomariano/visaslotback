@@ -1,0 +1,434 @@
+{
+  "cities": [
+    {
+      "city": "dublin",
+      "countries": [],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:41.836810Z"
+    },
+    {
+      "city": "edmonton",
+      "countries": [
+        {
+          "country": "Austria",
+          "flag": "🇦🇹",
+          "earliest_available": "20 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Lithuania",
+          "flag": "🇱🇹",
+          "earliest_available": "28 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Netherlands",
+          "flag": "🇳🇱",
+          "earliest_available": "20 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        }
+      ],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:43.977175Z"
+    },
+    {
+      "city": "cardiff",
+      "countries": [],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:45.845939Z"
+    },
+    {
+      "city": "boston",
+      "countries": [],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:47.706055Z"
+    },
+    {
+      "city": "london",
+      "countries": [
+        {
+          "country": "Cyprus",
+          "flag": "🇨🇾",
+          "earliest_available": "17 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Czechia",
+          "flag": "🇨🇿",
+          "earliest_available": "23 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Denmark",
+          "flag": "🇩🇰",
+          "earliest_available": "02 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Estonia",
+          "flag": "🇪🇪",
+          "earliest_available": "10 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Iceland",
+          "flag": "🇮🇸",
+          "earliest_available": "03 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Italy",
+          "flag": "🇮🇹",
+          "earliest_available": "13 Aug",
+          "slots": {
+            "MAY": null,
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Latvia",
+          "flag": "🇱🇻",
+          "earliest_available": "05 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Lithuania",
+          "flag": "🇱🇹",
+          "earliest_available": "06 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Malta",
+          "flag": "🇲🇹",
+          "earliest_available": "16 Jul",
+          "slots": {
+            "MAY": null,
+            "JUN": null,
+            "JUL": "1 +slots"
+          }
+        },
+        {
+          "country": "Norway",
+          "flag": "🇳🇴",
+          "earliest_available": "12 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Slovenia",
+          "flag": "🇸🇮",
+          "earliest_available": "18 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        }
+      ],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:49.720401Z"
+    },
+    {
+      "city": "manchester",
+      "countries": [
+        {
+          "country": "Denmark",
+          "flag": "🇩🇰",
+          "earliest_available": "19 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Estonia",
+          "flag": "🇪🇪",
+          "earliest_available": "10 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Finland",
+          "flag": "🇫🇮",
+          "earliest_available": "22 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Italy",
+          "flag": "🇮🇹",
+          "earliest_available": "21 Jul",
+          "slots": {
+            "MAY": null,
+            "JUN": null,
+            "JUL": "1 +slots"
+          }
+        },
+        {
+          "country": "Lithuania",
+          "flag": "🇱🇹",
+          "earliest_available": "10 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Malta",
+          "flag": "🇲🇹",
+          "earliest_available": "15 Jul",
+          "slots": {
+            "MAY": null,
+            "JUN": null,
+            "JUL": "1 +slots"
+          }
+        },
+        {
+          "country": "Portugal",
+          "flag": "🇵🇹",
+          "earliest_available": "12 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        }
+      ],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:51.934602Z"
+    },
+    {
+      "city": "new-york",
+      "countries": [
+        {
+          "country": "Austria",
+          "flag": "🇦🇹",
+          "earliest_available": "19 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Croatia",
+          "flag": "🇭🇷",
+          "earliest_available": "04 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Denmark",
+          "flag": "🇩🇰",
+          "earliest_available": "07 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Estonia",
+          "flag": "🇪🇪",
+          "earliest_available": "19 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Latvia",
+          "flag": "🇱🇻",
+          "earliest_available": "19 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Netherlands",
+          "flag": "🇳🇱",
+          "earliest_available": "02 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Norway",
+          "flag": "🇳🇴",
+          "earliest_available": "04 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Slovenia",
+          "flag": "🇸🇮",
+          "earliest_available": "20 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Sweden",
+          "flag": "🇸🇪",
+          "earliest_available": "23 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        }
+      ],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:54.225526Z"
+    },
+    {
+      "city": "toronto",
+      "countries": [
+        {
+          "country": "Croatia",
+          "flag": "🇭🇷",
+          "earliest_available": "09 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        },
+        {
+          "country": "Denmark",
+          "flag": "🇩🇰",
+          "earliest_available": "27 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Estonia",
+          "flag": "🇪🇪",
+          "earliest_available": "27 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Slovenia",
+          "flag": "🇸🇮",
+          "earliest_available": "03 Jun",
+          "slots": {
+            "MAY": null,
+            "JUN": "1 +slots",
+            "JUL": null
+          }
+        }
+      ],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:56.325263Z"
+    },
+    {
+      "city": "dubai",
+      "countries": [
+        {
+          "country": "Cyprus",
+          "flag": "🇨🇾",
+          "earliest_available": "20 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Denmark",
+          "flag": "🇩🇰",
+          "earliest_available": "21 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        },
+        {
+          "country": "Portugal",
+          "flag": "🇵🇹",
+          "earliest_available": "29 May",
+          "slots": {
+            "MAY": "1 +slots",
+            "JUN": null,
+            "JUL": null
+          }
+        }
+      ],
+      "temporarily_unavailable": [],
+      "timestamp": "2025-05-17T12:46:58.379850Z"
+    }
+  ]
+}

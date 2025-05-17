@@ -111,9 +111,8 @@ if ! pip install --prefer-binary --use-pep517 -r requirements.txt; then
     exit 1
 fi
 
-# Make scripts executable
-chmod +x run_monitor.py
-chmod +x restart_monitor.sh
+# Make scheduler executable
+chmod +x scheduler.py
 
 # Report Chrome path
 if [ -n "$CHROME_PATH" ]; then
@@ -122,6 +121,6 @@ else
     echo "Warning: Chrome path not set. The application may not work correctly."
 fi
 
-# Start the application with auto-restart capability
-echo "Starting appointment monitor with auto-restart capability..."
-exec ./run_monitor.py 
+# Start the scheduler
+echo "Starting appointment scheduler..."
+exec ./scheduler.py 
